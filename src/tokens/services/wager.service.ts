@@ -190,35 +190,13 @@ export class WagerService {
       // yet, so their funds are not touched until they accept (acceptWager).
       const stakeA = await this.tokenService.stakeTokens(playerAId, context);
 
-      wager.playerAStakeTxHash = stakeA.txHash ?? null;
-      wager.playerBStakeTxHash = stakeB.txHash ?? null;
-
-      const pendingSignatures = [
-        { userId: playerAId, result: stakeA },
-        { userId: playerBId, result: stakeB },
-      ]
-        .filter(
-          (entry) => entry.result.status === SettlementStatus.PENDING_SIGNATURE,
-        )
-        .map((entry) => ({
-          userId: entry.userId,
-          transaction: entry.result.unsignedTransaction as UnsignedTransaction,
-        }));
-
-      if (pendingSignatures.length > 0) {
-        for (const entry of pendingSignatures) {
-          if (entry.userId === playerAId) {
-            wager.playerALatestStakeHash = entry.transaction.hash;
-          } else {
-            wager.playerBLatestStakeHash = entry.transaction.hash;
-          }
-        }
-
-        // A player who never signs would otherwise leave the other player's
-        // stake locked in the pot forever; WagerRefundJob sweeps past this.
-        wager.stakeDeadline = new Date(Date.now() + this.stakeDeadlineMs);
-
       if (stakeA.status === SettlementStatus.PENDING_SIGNATURE) {
+        // The stake has not landed yet: remember which transaction we handed
+        // out so confirmStake only accepts a signature over this one, and set
+        // the deadline so WagerRefundJob can sweep a player who never signs.
+        wager.playerALatestStakeHash =
+          stakeA.unsignedTransaction?.hash ?? null;
+        wager.stakeDeadline = new Date(Date.now() + this.stakeDeadlineMs);
         wager.resultMessage =
           'Sign your stake transaction in your wallet. Player two stakes when they accept.';
         wager = await this.wagerRepository.save(wager);
