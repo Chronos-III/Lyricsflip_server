@@ -15,6 +15,7 @@ import { User } from '../users/entities/user.entity';
 import { cacheConfig } from '../config/cache.config';
 import { Genre } from './entities/genre.enum';
 import { MAX_PAGE_SIZE } from '../common/dto/pagination-query.dto';
+import { normalizeDecade } from '../game/progression.util';
 
 /**
  * Maximum length of a lyric snippet served to players. Full lyric text is
@@ -85,7 +86,11 @@ export class LyricsService {
     const lyrics = this.lyricsRepository.create({
       ...createLyricsDto,
       lyricSnippet,
-      decade: createLyricsDto.decade?.toString(), // entity stores decade as varchar
+      // Store decades in the canonical "1990s" format used by the seed and
+      // the MusicDecade preference enum.
+      decade: createLyricsDto.decade
+        ? normalizeDecade(createLyricsDto.decade.toString())
+        : createLyricsDto.decade,
       createdBy: user,
     });
     const savedLyrics = await this.lyricsRepository.save(lyrics);
@@ -98,7 +103,7 @@ export class LyricsService {
 
   async findAll(
     genre?: string,
-    decade?: number,
+    decade?: number | string,
     limit: number = MAX_PAGE_SIZE,
     offset: number = 0,
   ): Promise<Lyrics[]> {
@@ -118,21 +123,16 @@ export class LyricsService {
       query.andWhere('lyrics.genre = :genre', { genre });
     }
 
-    // Apply decade filter if provided
-    if (decade) {
-      // Validate decade (should be 4-digit year in decades: 1990, 2000, 2010, etc.)
-      if (
-        decade < 1900 ||
-        decade > new Date().getFullYear() ||
-        decade % 10 !== 0
-      ) {
+    // Apply decade filter if provided. Accept both "1990" and "1990s" and
+    // normalise to the stored "1990s" format before querying.
+    if (decade !== undefined && decade !== null && decade !== '') {
+      const decadeStr = normalizeDecade(decade.toString());
+      if (!decadeStr) {
         throw new BadRequestException(
-          'Invalid decade. Please provide a 4-digit year in decades (e.g., 1990, 2000, 2010)',
+          'Invalid decade. Please provide a decade such as 1990 or 1990s',
         );
       }
 
-      // Convert decade to string format for database query (since entity uses varchar)
-      const decadeStr = decade.toString();
       query.andWhere('lyrics.decade = :decade', { decade: decadeStr });
     }
 
@@ -200,6 +200,10 @@ export class LyricsService {
     Object.assign(lyrics, updateLyricsDto);
     lyrics.updatedAt = new Date(); // Assuming you have updatedAt field
 
+    if (updateLyricsDto.decade !== undefined && updateLyricsDto.decade !== null) {
+      lyrics.decade = normalizeDecade(updateLyricsDto.decade.toString());
+    }
+
     if (updateLyricsDto.lyricSnippet !== undefined) {
       this.assertSnippetWithinLimit(updateLyricsDto.lyricSnippet.trim());
     }
@@ -261,41 +265,6 @@ export class LyricsService {
       return false;
     }
 
-    const normalizedGuess = this.normalizeAnswer(guess);
-    if (!normalizedGuess) {
-      return false;
-    }
+    const normalizedGuess = this.norma
 
-    const candidates = [canonical, ...(aliases ?? [])];
-    return candidates.some(
-      (candidate) =>
-        candidate != null &&
-        this.normalizeAnswer(candidate) === normalizedGuess,
-    );
-  }
-
-  /**
-   * Score a guess against a lyric's canonical artist/title and their aliases.
-   * A guess that matches an alias is scored as correct.
-   */
-  scoreGuess(
-    lyrics: Lyrics,
-    guess: { artist?: string; title?: string },
-  ): { artistCorrect: boolean; titleCorrect: boolean } {
-    return {
-      artistCorrect: this.matchesAnswer(
-        guess.artist ?? '',
-        lyrics.artist,
-        lyrics.artistAliases,
-      ),
-      titleCorrect: this.matchesAnswer(
-        guess.title ?? '',
-        lyrics.title,
-        lyrics.titleAliases,
-      ),
-    };
-  }
-
-  /*
-
-/* … truncated 1609 chars — edit only what you need near the top … */
+/* … truncated 927 chars — edit only what you need near the top … */
