@@ -35,6 +35,7 @@ import { MultipleLyricsDto } from './dto/multiple-lyrics.dto';
 import { GuessDto } from './dto/guess.dto';
 import { GetUser } from 'src/auth/decorators/user.decorator';
 import { User } from 'src/users/entities/user.entity';
+import { Genre } from 'src/lyrics/entities/genre.enum';
 
 @ApiTags('game')
 @Controller('game')
@@ -72,7 +73,10 @@ export class GameController {
         ...options,
         // Pass the player's preferences so the service can use them as
         // fallback filters when no explicit genre/decade was supplied (#176).
-        preferredGenre: user.preferredGenre ?? undefined,
+        // Only forward the preferred genre when it is a valid lyric genre;
+        // otherwise the fallback would throw a 400 for stored preferences
+        // that are not part of the lyric `Genre` enum (#310).
+        preferredGenre: this.toLyricGenre(user.preferredGenre),
         preferredDecade: user.preferredDecade ?? undefined,
       });
       const round = await this.gameLogicService.issueRound(
@@ -97,6 +101,18 @@ export class GameController {
       this.logger.error('Error fetching random lyric', error.stack);
       throw error;
     }
+  }
+
+  /**
+   * Returns the value as a lyric `Genre` when it is one, otherwise
+   * `undefined` so the preference fallback is simply skipped.
+   */
+  private toLyricGenre(value?: string | null): Genre | undefined {
+    if (!value) {
+      return undefined;
+    }
+    const genres = Object.values(Genre) as string[];
+    return genres.includes(value) ? (value as Genre) : undefined;
   }
 
   /**
