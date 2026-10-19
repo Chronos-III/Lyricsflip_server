@@ -987,3 +987,6 @@ Do not run stellar mode with real value until the P0 issues are closed.
 - #180: [94] Friends and direct challenges
 <!-- handsoff-issue-187 -->
 - #187: [101] Let players report wrong lyrics or answers
+
+<!-- handsoff-issue-299 -->
+- #299: [R2-44] Invitation expiry races with accept, and abandons a session before its refund succeeds
