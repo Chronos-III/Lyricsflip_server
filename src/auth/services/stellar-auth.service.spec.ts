@@ -285,7 +285,7 @@ describe('StellarAuthService', () => {
       ...over,
     });
 
-    it('issues a JWT for the account linked to the signing wallet', async () => {
+    it('issues tokens through the shared AuthTokenService issuer', async () => {
       userRepository.findOne.mockResolvedValue(linkedUser());
 
       const result = await service.loginWithWallet(signedChallengeFor(wallet));
@@ -294,6 +294,21 @@ describe('StellarAuthService', () => {
       expect(jwtService.sign).toHaveBeenCalledWith(
         expect.objectContaining({ sub: 'user-1', username: 'player' }),
       );
+    });
+
+    it('returns the same response shape as password login', async () => {
+      userRepository.findOne.mockResolvedValue(linkedUser());
+
+      const result = await service.loginWithWallet(signedChallengeFor(wallet));
+
+      expect(Object.keys(result).sort()).toEqual(
+        ['accessToken', 'user'].sort(),
+      );
+      expect(result.user).toMatchObject({
+        id: 'user-1',
+        email: 'player@lyricsflip.test',
+        username: 'player',
+      });
     });
 
     it('never returns the password hash', async () => {

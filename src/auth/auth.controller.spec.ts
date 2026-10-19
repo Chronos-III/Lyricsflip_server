@@ -3,6 +3,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { StellarAuthService } from './services/stellar-auth.service';
 import { User } from '../users/entities/user.entity';
+import { AUDIT_ACTION_KEY } from '../audit/audit.constants';
 
 describe('AuthController', () => {
   let controller: AuthController;
@@ -136,6 +137,12 @@ describe('AuthController', () => {
       );
     });
 
+    it('records an audit action when linking a wallet', () => {
+      expect(
+        Reflect.getMetadata(AUDIT_ACTION_KEY, AuthController.prototype.linkWallet),
+      ).toBeDefined();
+    });
+
     it('returns the linked wallet and when it was verified', () => {
       expect(controller.getWallet(user)).toEqual({
         stellarAddress: PLAYER_ACCOUNT,
@@ -155,6 +162,15 @@ describe('AuthController', () => {
         message: 'Stellar wallet unlinked',
       });
       expect(stellarAuthService.unlinkWallet).toHaveBeenCalledWith('user-1');
+    });
+
+    it('records an audit action when unlinking a wallet', () => {
+      expect(
+        Reflect.getMetadata(
+          AUDIT_ACTION_KEY,
+          AuthController.prototype.unlinkWallet,
+        ),
+      ).toBeDefined();
     });
   });
 });

@@ -155,6 +155,16 @@ export class User {
   stellarAddressVerifiedAt?: Date | null;
 
   /**
+   * When the user proved ownership of their email address.
+   *
+   * Null until the verification link is followed. Unverified users may still
+   * play and link a wallet, but cannot wager (see docs/email-verification.md).
+   */
+  @Expose({ groups: PRIVATE_USER_GROUPS })
+  @Column({ type: 'timestamp', nullable: true })
+  emailVerifiedAt?: Date | null;
+
+  /**
    * Balance used only by the mock settlement backend, in token base units
    * (stroops) held as a string.
    *
