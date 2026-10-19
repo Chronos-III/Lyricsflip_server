@@ -6,7 +6,6 @@ import {
   Matches,
   Min,
   IsString,
-  IsBoolean,
 } from 'class-validator';
 import {
   GameCategory,
@@ -58,7 +57,8 @@ export class CreateGameSessionDto {
     description:
       'Amount each player stakes, as a decimal LYRIC string ("10", "2.5"). ' +
       'Sent as a string rather than a number so that fractional stakes cannot ' +
-      'be mangled by floating-point rounding on the way in.',
+      'be mangled by floating-point rounding on the way in. Only honoured when ' +
+      'mode is "wagered"; the server derives hasWager from the mode.',
     required: false,
     example: '10',
     type: String,
@@ -70,12 +70,4 @@ export class CreateGameSessionDto {
       'wagerAmount must be a non-negative decimal with at most 7 decimal places',
   })
   wagerAmount?: string;
-
-  @ApiProperty({
-    description: 'Whether this session has a wager',
-    required: false,
-  })
-  @IsOptional()
-  @IsBoolean()
-  hasWager?: boolean;
 }
