@@ -29,6 +29,7 @@ import type {
   SettlementMode,
 } from '../../stellar/stellar.config';
 import { Stroops, fromStroops, isAtLeast } from '../../stellar/amount.util';
+import { checkTrustline } from '../../stellar/trustline.util';
 
 /**
  * Settlement backed by the LyricsFlip escrow contract on Stellar.
@@ -64,6 +65,9 @@ export class StellarTokenService implements ITokenService {
         this.requireAddress(context.playerAId),
         this.requireAddress(context.playerBId),
       ]);
+
+      await this.assertCanReceiveToken(playerAAddress, context.playerAId);
+      await this.assertCanReceiveToken(playerBAddress, context.playerBId);
 
       const result = await this.escrow.openPot(
         this.keyStore.getResolverKeypair(),
@@ -260,126 +264,39 @@ export class StellarTokenService implements ITokenService {
 
     return {
       success: false,
-      status: SettlementStatus.SUBMITTED,
-      txHash,
-      message:
-        submission.error ??
-        'Transaction is still unconfirmed; the pot has not moved on-chain.',
+      status: SettlementStatus.SUBMIT
     };
   }
 
   /**
-   * Resolves a player to the address a payout must go to: the one recorded on
-   * the on-chain pot, not whatever is currently linked to their account.
+   * Rejects a wager before anything is written on-chain when a player's
+   * account cannot receive the token.
    *
-   * A player can unlink or relink their wallet in the window between staking
-   * and settlement being blocked elsewhere, but this is the line that actually
-   * decides where the money goes, so it never trusts the live `stellarAddress`
-   * for a payout. Falling back to `requireAddress` only covers a pot the
-   * backend cannot read (or one from before this existed), and only for a
-   * player who currently has an address linked.
+   * A SAC-wrapped classic asset only reaches an account that holds a
+   * trustline for the underlying asset; a native Soroban token needs none.
+   * The check is skipped for native tokens so we do not pay for a Horizon
+   * round-trip that can never fail.
    */
-  private async addressForPlayer(
+  private async assertCanReceiveToken(
+    address: string,
     userId: string,
-    context: EscrowContext,
-  ): Promise<string> {
-    const pot = await this.escrow.getPot(context.sessionId);
-
-    if (pot) {
-      if (userId === context.playerAId) {
-        return pot.playerA;
-      }
-      if (userId === context.playerBId) {
-        return pot.playerB;
-      }
+  ): Promise<void> {
+    if (!this.config.tokenIsSacWrapped) {
+      return;
     }
 
-    return this.requireAddress(userId);
-  }
-
-  /**
-   * Resolves a user to the Stellar address they proved ownership of.
-   *
-   * An unverified address is refused rather than used: paying a pot to an
-   * address nobody has signed for is unrecoverable.
-   */
-  private async requireAddress(userId: string): Promise<string> {
-    const user = await this.userRepository.findOne({ where: { id: userId } });
-
-    if (!user) {
-      throw new NotFoundException(`User with ID ${userId} not found`);
-    }
-
-    if (!user.stellarAddress) {
-      throw new BadRequestException(
-        `${user.username} has not linked a Stellar wallet yet. ` +
-          'Link one via POST /auth/stellar/challenge before joining a wagered match.',
-      );
-    }
-
-    if (!user.stellarAddressVerifiedAt) {
-      throw new BadRequestException(
-        `${user.username}'s Stellar wallet is not verified. ` +
-          'Complete the SEP-10 challenge to prove ownership.',
-      );
-    }
-
-    return user.stellarAddress;
-  }
-
-  /**
-   * Reads a balance without letting a failed read fail the whole settlement:
-   * the balance is informational, the transaction result is not.
-   */
-  private async safeBalance(address: string): Promise<Stroops | undefined> {
-    try {
-      return await this.escrow.getTokenBalance(address);
-    } catch (error) {
-      this.logger.debug(
-        `Balance read for ${address} failed: ${(error as Error).message}`,
-      );
-      return undefined;
-    }
-  }
-
-  private toTransactionResult(
-    result: SubmitResult,
-    successMessage: string,
-    newBalance?: Stroops,
-  ): TokenTransactionResult {
-    if (result.confirmed) {
-      return {
-        success: true,
-        status: SettlementStatus.CONFIRMED,
-        txHash: result.hash,
-        ledger: result.ledger,
-        newBalance,
-        message: successMessage,
-      };
-    }
-
-    // An unconfirmed submission is not a failure: the transaction may still be
-    // included. Reporting it as SUBMITTED keeps the wager in a state the
-    // reconciler will revisit, instead of one a retry could double-settle.
-    return {
-      success: false,
-      status: SettlementStatus.SUBMITTED,
-      txHash: result.hash,
-      message: result.error ?? 'Awaiting network confirmation',
-    };
-  }
-
-  private toFailure(error: unknown, action: string): TokenTransactionResult {
-    const message = (error as Error).message;
-    this.logger.error(
-      `Failed to ${action}: ${message}`,
-      (error as Error).stack,
+    const result = await checkTrustline(
+      address,
+      this.config.tokenContractId,
+      this.config.horizonUrl,
     );
 
-    return {
-      success: false,
-      status: SettlementStatus.FAILED,
-      message: `Failed to ${action}: ${message}`,
-    };
+    if (!result.hasTrustline) {
+      throw new BadRequestException(
+        `Player ${userId} cannot receive LYRIC: account ${address} has no ` +
+          'trustline for the token. Add the trustline in your wallet before ' +
+          'opening a wager.',
+      );
+    }
   }
 }
