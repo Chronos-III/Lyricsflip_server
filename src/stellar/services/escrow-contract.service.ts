@@ -7,7 +7,6 @@ import {
 } from '@nestjs/common';
 import {
   Address,
-  Keypair,
   Operation,
   Transaction,
   nativeToScVal,
@@ -20,6 +19,7 @@ import {
   SubmitResult,
   UnsignedTransaction,
 } from './stellar-rpc.service';
+import { TransactionSigner } from './transaction-signer';
 import { Stroops, toBigInt } from '../amount.util';
 
 /** Lifecycle of a pot, mirroring the contract's `PotStatus` enum. */
@@ -61,7 +61,7 @@ export class EscrowContractService {
    * backend knows which two players a session belongs to.
    */
   async openPot(
-    resolver: Keypair,
+    resolver: TransactionSigner,
     sessionId: string,
     playerAAddress: string,
     playerBAddress: string,
@@ -83,7 +83,7 @@ export class EscrowContractService {
       `Opening pot for session ${sessionId} with stake ${stake}`,
     );
 
-    return this.rpc.signAndSubmit(transaction, [resolver]);
+    return this.rpc.signAndSubmit(transaction, resolver);
   }
 
   /**
@@ -153,7 +153,7 @@ export class EscrowContractService {
 
   /** Releases the pot to the winner. Resolver-signed. */
   async resolve(
-    resolver: Keypair,
+    resolver: TransactionSigner,
     sessionId: string,
     winnerAddress: string,
   ): Promise<SubmitResult> {
@@ -168,11 +168,14 @@ export class EscrowContractService {
       `Resolving pot for session ${sessionId} in favour of ${winnerAddress}`,
     );
 
-    return this.rpc.signAndSubmit(transaction, [resolver]);
+    return this.rpc.signAndSubmit(transaction, resolver);
   }
 
   /** Returns every staked amount to the player who staked it. Resolver-signed. */
-  async refund(resolver: Keypair, sessionId: string): Promise<SubmitResult> {
+  async refund(
+    resolver: TransactionSigner,
+    sessionId: string,
+  ): Promise<SubmitResult> {
     const transaction = await this.rpc.buildInvocation(
       resolver.publicKey(),
       this.config.escrowContractId,
@@ -182,7 +185,7 @@ export class EscrowContractService {
 
     this.logger.debug(`Refunding pot for session ${sessionId}`);
 
-    return this.rpc.signAndSubmit(transaction, [resolver]);
+    return this.rpc.signAndSubmit(transaction, resolver);
   }
 
   /**
@@ -272,74 +275,50 @@ export class EscrowContractService {
     }
 
     if (invocation.functionName.toString() !== 'stake') {
-      reject('it calls the wrong function');
+      reject('it calls the wrong contract function');
     }
 
-    const expected = [
-      this.sessionIdToScVal(sessionId),
-      addressToScVal(playerAddress),
-    ].map((arg) => arg.toXdr('base64'));
-    const actual = invocation.args.map((arg) => arg.toXdr('base64'));
+    const args = invocation.args;
+    if (args.length !== 2) {
+      reject('it passes the wrong arguments');
+    }
 
-    if (
-      actual.length !== expected.length ||
-      actual.some((arg, i) => arg !== expected[i])
-    ) {
-      reject('it is for a different session or player');
+    const [sessionArg, playerArg] = args;
+    if (sessionArg.switch().name !== 'scvString') {
+      reject('the session id is not a string');
+    }
+    if (sessionArg.str().toString() !== sessionId) {
+      reject('it stakes a different session');
+    }
+
+    const stakedPlayer = Address.fromScVal(playerArg).toString();
+    if (stakedPlayer !== playerAddress) {
+      reject('it stakes for a different player');
     }
   }
 
-  /**
-   * Encodes a session UUID as the contract's `BytesN<16>` session key.
-   *
-   * A UUID is exactly 16 bytes once the dashes are stripped, so it maps onto
-   * the contract key without hashing or truncation.
-   */
   private sessionIdToScVal(sessionId: string): xdr.ScVal {
-    const hex = sessionId.replace(/-/g, '');
-
-    if (hex.length !== 32 || !/^[0-9a-fA-F]+$/.test(hex)) {
-      throw new Error(
-        `Session ID "${sessionId}" is not a UUID; the escrow contract keys pots by the 16 UUID bytes`,
-      );
-    }
-
-    return xdr.ScVal.scvBytes(Buffer.from(hex, 'hex'));
+    return nativeToScVal(sessionId, { type: 'string' });
   }
 }
 
-/** Encodes a Stellar address (G... or C...) as a contract argument. */
 function addressToScVal(address: string): xdr.ScVal {
-  return new Address(address).toScVal();
+  return Address.fromString(address).toScVal();
 }
 
-/** Encodes a stroop amount as the contract's i128 argument. */
 function amountToScVal(amount: Stroops): xdr.ScVal {
   return nativeToScVal(toBigInt(amount), { type: 'i128' });
 }
 
-/**
- * Turns the decoded return value of a `balance` call into stroops.
- *
- * `scValToNative` gives a bigint for the contract's i128, but the call is typed
- * `unknown`, and stringifying an unexpected object would quietly yield
- * "[object Object]" as somebody's balance. Narrowing here means a surprising
- * return type fails immediately, with the value that caused it.
- */
-function decodeBalance(balance: unknown): Stroops {
-  if (balance === null || balance === undefined) {
-    return '0';
+function decodeBalance(value: unknown): Stroops {
+  if (typeof value === 'bigint') {
+    return value.toString();
   }
-
-  if (
-    typeof balance === 'bigint' ||
-    typeof balance === 'number' ||
-    typeof balance === 'string'
-  ) {
-    return String(balance);
+  if (typeof value === 'number') {
+    return String(value);
   }
-
-  throw new ServiceUnavailableException(
-    `Token contract returned an unreadable balance of type ${typeof balance}`,
-  );
+  if (typeof value === 'string') {
+    return value;
+  }
+  throw new ServiceUnavailableException('Unexpected token balance response');
 }
