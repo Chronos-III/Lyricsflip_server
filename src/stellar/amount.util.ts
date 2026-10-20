@@ -1,10 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
-import {
-  I128_MAX,
-  I128_MIN,
-  STROOPS_PER_TOKEN,
-  TOKEN_DECIMALS,
-} from './stellar.constants';
+import { I128_MAX, I128_MIN } from './stellar.constants';
+import { getTokenDecimals } from './token-decimals';
 
 /**
  * A token amount in base units ("stroops"), carried as a decimal string.
@@ -16,8 +12,17 @@ import {
  */
 export type Stroops = string;
 
-const DISPLAY_AMOUNT_PATTERN = /^\d+(\.\d{1,7})?$/;
 const STROOPS_PATTERN = /^-?\d+$/;
+
+/**
+ * Builds the display-amount pattern for the configured token decimals so the
+ * accepted precision always matches the single source of truth.
+ */
+function displayAmountPattern(decimals: number): RegExp {
+  return decimals > 0
+    ? new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`)
+    : /^\d+$/;
+}
 
 /**
  * Parses a stroop string into a bigint, rejecting anything that is not a
@@ -55,17 +60,19 @@ export function toStroops(displayAmount: string): Stroops {
     );
   }
 
+  const decimals = getTokenDecimals();
   const trimmed = displayAmount.trim();
 
-  if (!DISPLAY_AMOUNT_PATTERN.test(trimmed)) {
+  if (!displayAmountPattern(decimals).test(trimmed)) {
     throw new BadRequestException(
-      `Invalid token amount "${displayAmount}": expected a non-negative decimal with at most ${TOKEN_DECIMALS} decimal places`,
+      `Invalid token amount "${displayAmount}": expected a non-negative decimal with at most ${decimals} decimal places`,
     );
   }
 
   const [whole, fraction = ''] = trimmed.split('.');
-  const paddedFraction = fraction.padEnd(TOKEN_DECIMALS, '0');
-  const value = BigInt(whole) * STROOPS_PER_TOKEN + BigInt(paddedFraction);
+  const paddedFraction = fraction.padEnd(decimals, '0');
+  const value =
+    BigInt(whole) * 10n ** BigInt(decimals) + BigInt(paddedFraction || '0');
 
   if (value > I128_MAX) {
     throw new BadRequestException(
@@ -81,14 +88,16 @@ export function toStroops(displayAmount: string): Stroops {
  * zeros but always keeping at least one decimal place ("10.0", "0.5").
  */
 export function fromStroops(stroops: Stroops): string {
+  const decimals = getTokenDecimals();
   const value = toBigInt(stroops);
   const negative = value < 0n;
   const magnitude = negative ? -value : value;
+  const base = 10n ** BigInt(decimals);
 
-  const whole = magnitude / STROOPS_PER_TOKEN;
-  const fraction = (magnitude % STROOPS_PER_TOKEN)
+  const whole = magnitude / base;
+  const fraction = (magnitude % base)
     .toString()
-    .padStart(TOKEN_DECIMALS, '0')
+    .padStart(decimals, '0')
     .replace(/0+$/, '');
 
   return `${negative ? '-' : ''}${whole}.${fraction || '0'}`;

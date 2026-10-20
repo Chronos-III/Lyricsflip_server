@@ -177,6 +177,30 @@ export class User {
   @Column({ type: 'bigint', default: '1000000000' })
   mockBalance: string; // 100.0000000 LYRIC
 
+  /**
+   * Responsible-play: per-user daily stake limit in token base units
+   * (stroops) held as a string, or null for no personal limit.
+   *
+   * Lowering the limit applies immediately; raising it is deferred until
+   * `dailyStakeLimitEffectiveAt` (a cooling-off period) has passed.
+   */
+  @Expose({ groups: PRIVATE_USER_GROUPS })
+  @Column({ type: 'bigint', nullable: true })
+  dailyStakeLimit?: string | null;
+
+  /** When a pending (raised) daily stake limit becomes effective. */
+  @Expose({ groups: PRIVATE_USER_GROUPS })
+  @Column({ type: 'timestamp', nullable: true })
+  dailyStakeLimitEffectiveAt?: Date | null;
+
+  /**
+   * Responsible-play: self-exclusion end date. While in the future the user
+   * cannot create or accept wagers. Null means no active exclusion.
+   */
+  @Expose({ groups: PRIVATE_USER_GROUPS })
+  @Column({ type: 'timestamp', nullable: true })
+  selfExclusionEndsAt?: Date | null;
+
   @Expose({ groups: PRIVATE_USER_GROUPS })
   @Column({
     type: 'enum',
