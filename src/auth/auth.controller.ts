@@ -223,6 +223,40 @@ export class AuthController {
   })
   @HttpCode(HttpStatus.OK)
   async linkWallet(
-    @GetUser() user: User
+    @GetUser() user: User,
+    @Body(ValidationPipe) dto: StellarVerifyDto,
+  ) {
+    return this.stellarAuthService.linkWallet(user.id, dto.transaction);
+  }
 
-/* … truncated 1110 chars — edit only what you need near the top … */
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @Get('stellar/wallet')
+  @ApiOperation({
+    summary: 'Get the Stellar wallet linked to the signed-in account',
+  })
+  @ApiResponse({ status: 200, description: 'Linked wallet, or nulls if none.' })
+  async getWallet(@GetUser() user: User) {
+    return {
+      stellarAddress: user.stellarAddress ?? null,
+      verifiedAt: user.stellarAddressVerifiedAt ?? null,
+    };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @Throttle(stellarThrottle)
+  @Delete('stellar/wallet')
+  @Audited({ action: 'auth.wallet.unlink', targetType: 'user' })
+  @ApiOperation({
+    summary: 'Unlink the Stellar wallet from the signed-in account',
+    description:
+      'The account can no longer authenticate with the wallet or join wagered ' +
+      'matches until a wallet is linked again.',
+  })
+  @ApiResponse({ status: 200, description: 'Wallet unlinked.' })
+  @HttpCode(HttpStatus.OK)
+  async unlinkWallet(@GetUser() user: User) {
+    await this.stellarAuthService.unlinkWallet(user.id);
+    return { message: 'Stellar wallet unlinked' };
+  }

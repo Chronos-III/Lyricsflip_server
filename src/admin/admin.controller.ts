@@ -30,9 +30,12 @@ import { Role } from '../auth/roles/role.enum';
 import { AdminService } from './admin.service';
 import { AuditInterceptor } from '../audit/audit.interceptor';
 import { Audited } from '../audit/decorators/audited.decorator';
-import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 import { UserGroup } from '../users/user-serialization';
 import { ImportLyricsDto } from './dto/import-lyrics.dto';
+import { AdminUserQueryDto } from './dto/admin-user-query.dto';
+import { AdminLyricQueryDto } from './dto/admin-lyric-query.dto';
+import { GetUser } from '../auth/decorators/get-user.decorator';
+import { User } from '../users/entities/user.entity';
 
 @ApiTags('admin')
 @Controller('admin')
@@ -46,11 +49,17 @@ export class AdminController {
   // --- User Management ---
   @Get('users')
   @ApiOperation({ summary: 'List users as an admin' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'offset', required: false, type: Number })
+  @ApiQuery({
+    name: 'sortBy',
+    required: false,
+    enum: ['createdAt', 'username', 'email', 'role'],
+  })
+  @ApiQuery({ name: 'sortOrder', required: false, enum: ['ASC', 'DESC'] })
   @ApiResponse({ status: 200, description: 'List of users.', type: [Object] })
   @SerializeOptions({ groups: [UserGroup.ADMIN] })
-  findAllUsers(@Query() query: PaginationQueryDto) {
+  findAllUsers(@Query() query: AdminUserQueryDto) {
     return this.adminService.findAllUsers(query);
   }
 
@@ -65,12 +74,22 @@ export class AdminController {
   // --- Lyrics Management ---
   @Get('lyrics')
   @ApiOperation({ summary: 'List lyrics for admin review' })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'offset', required: false, type: Number })
+  @ApiQuery({
+    name: 'sortBy',
+    required: false,
+    enum: ['createdAt', 'title', 'artist'],
+  })
+  @ApiQuery({ name: 'sortOrder', required: false, enum: ['ASC', 'DESC'] })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['active', 'inactive', 'all'],
+  })
   @ApiResponse({ status: 200, description: 'List of lyrics.', type: [Object] })
-  findAllLyrics(
-    @Query() query: PaginationQueryDto,
-    @Query('status') status?: string,
-  ) {
-    return this.adminService.findAllLyrics(query, status);
+  findAllLyrics(@Query() query: AdminLyricQueryDto) {
+    return this.adminService.findAllLyrics(query);
   }
 
   @Post('lyrics/import')
@@ -83,9 +102,10 @@ export class AdminController {
   importLyrics(
     @UploadedFile() file: Express.Multer.File,
     @Body() body: ImportLyricsDto,
+    @GetUser() user: User,
   ) {
     const dryRun = body?.dryRun === true || body?.dryRun === 'true';
-    return this.adminService.importLyrics(file, dryRun);
+    return this.adminService.importLyrics(file, dryRun, user);
   }
 
   @Post('lyrics/:id/restore')

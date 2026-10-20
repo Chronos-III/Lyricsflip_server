@@ -17,6 +17,23 @@ module.exports = {
   ],
   collectCoverageFrom: ['src/**/*.(t|j)s'],
   coverageDirectory: './coverage',
+  // Coverage is collected whenever `--coverage` is passed (e.g. `npm test --
+  // --coverage`). Thresholds below make the run fail if coverage regresses, so
+  // it cannot quietly fall again.
+  coverageThreshold: {
+    global: {
+      lines: 70,
+    },
+    './src/tokens/': {
+      lines: 70,
+    },
+    './src/stellar/': {
+      lines: 70,
+    },
+    './src/auth/': {
+      lines: 70,
+    },
+  },
   testEnvironment: 'node',
   moduleNameMapper: {
     '^src/(.*)$': '<rootDir>/src/$1',

@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { UnauthorizedException } from '@nestjs/common';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
@@ -14,6 +15,9 @@ describe('UsersController', () => {
     updatePreferences: jest.Mock;
     getUserPreferences: jest.Mock;
     getPublicProfile: jest.Mock;
+    getSelfProfile: jest.Mock;
+    deleteAccount: jest.Mock;
+    findByUsername: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -27,6 +31,9 @@ describe('UsersController', () => {
       updatePreferences: jest.fn(),
       getUserPreferences: jest.fn(),
       getPublicProfile: jest.fn(),
+      getSelfProfile: jest.fn(),
+      deleteAccount: jest.fn(),
+      findByUsername: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -77,6 +84,86 @@ describe('UsersController', () => {
 
       expect(usersService.findOne).toHaveBeenCalledWith('1');
       expect(result).toEqual(user);
+    });
+  });
+
+  describe('getSelfProfile', () => {
+    it('delegates to the service with the authenticated user id', async () => {
+      const profile = { id: '1', username: 'alice', email: 'a@example.com' };
+      usersService.getSelfProfile.mockResolvedValue(profile);
+
+      const result = await controller.getSelfProfile({ user: { id: '1' } });
+
+      expect(usersService.getSelfProfile).toHaveBeenCalledWith('1');
+      expect(result).toEqual(profile);
+    });
+  });
+
+  describe('findByUsername', () => {
+    it('delegates to the service', async () => {
+      const profile = { username: 'alice', level: 5 };
+      usersService.findByUsername.mockResolvedValue(profile);
+
+      const result = await controller.findByUsername('alice');
+
+      expect(usersService.findByUsername).toHaveBeenCalledWith('alice');
+      expect(result).toEqual(profile);
+    });
+  });
+
+  describe('getLeaderboard', () => {
+    it('passes an options object to the service', async () => {
+      const leaderboard = { entries: [], myRank: 3 };
+      usersService.getLeaderboard.mockResolvedValue(leaderboard);
+
+      const result = await controller.getLeaderboard(
+        { limit: 10, offset: 0 },
+        { user: { id: '1' } },
+      );
+
+      expect(usersService.getLeaderboard).toHaveBeenCalledWith({
+        limit: 10,
+        offset: 0,
+        userId: '1',
+      });
+      expect(result).toEqual(leaderboard);
+    });
+
+    it('works without an authenticated user', async () => {
+      const leaderboard = { entries: [] };
+      usersService.getLeaderboard.mockResolvedValue(leaderboard);
+
+      const result = await controller.getLeaderboard({ limit: 10, offset: 0 }, {});
+
+      expect(usersService.getLeaderboard).toHaveBeenCalledWith({
+        limit: 10,
+        offset: 0,
+        userId: undefined,
+      });
+      expect(result).toEqual(leaderboard);
+    });
+  });
+
+  describe('removeMe', () => {
+    it('forwards the password to deleteAccount', async () => {
+      usersService.deleteAccount.mockResolvedValue({ message: 'Account deleted' });
+
+      const result = await controller.removeMe(
+        { user: { id: '1' } },
+        { password: 'secret' },
+      );
+
+      expect(usersService.deleteAccount).toHaveBeenCalledWith('1', 'secret');
+      expect(result).toEqual({ message: 'Account deleted' });
+    });
+
+    it('surfaces a wrong password as 401', async () => {
+      const unauthorized = new UnauthorizedException('Invalid password');
+      usersService.deleteAccount.mockRejectedValue(unauthorized);
+
+      await expect(
+        controller.removeMe({ user: { id: '1' } }, { password: 'wrong' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
     });
   });
 });

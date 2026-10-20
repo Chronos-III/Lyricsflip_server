@@ -7,7 +7,7 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { User } from './user.entity';
+import { User } from '../../users/entities/user.entity';
 
 @Entity('refresh_tokens')
 export class RefreshToken {
@@ -15,23 +15,23 @@ export class RefreshToken {
   id: string;
 
   @Index()
-  @Column({ name: 'user_id' })
+  @Column()
   userId: string;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'user_id' })
+  @JoinColumn()
   user: User;
 
   @Index({ unique: true })
-  @Column({ name: 'token_hash' })
+  @Column()
   tokenHash: string;
 
-  @Column({ name: 'expires_at', type: 'timestamptz' })
+  @Column({ type: 'timestamptz' })
   expiresAt: Date;
 
-  @Column({ name: 'revoked_at', type: 'timestamptz', nullable: true })
+  @Column({ type: 'timestamptz', nullable: true })
   revokedAt: Date | null;
 
-  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

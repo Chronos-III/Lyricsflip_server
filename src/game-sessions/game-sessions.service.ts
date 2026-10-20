@@ -4,9 +4,6 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  Inject,
-  Logger,
-  ForbiddenException,
   GoneException,
   Inject,
   Logger,
@@ -63,10 +60,6 @@ const TERMINAL_WAGER_STATUSES = [
   WagerStatus.FAILED,
 ];
 
-@Injectable()
-export class GameSessionsService {
-  /** Every settlement decision is written here: who, with what, and the result. */
-  private readonly auditLogger = new Logger('SettlementAudit');
 /** How long player two has to accept an invitation. */
 const INVITATION_TTL_MS =
   Number(process.env.INVITATION_TTL_MINUTES ?? 30) * 60 * 1000;
@@ -79,6 +72,8 @@ export class GameSessionsService
   implements OnApplicationBootstrap, OnApplicationShutdown
 {
   private readonly logger = new Logger(GameSessionsService.name);
+  /** Every settlement decision is written here: who, with what, and the result. */
+  private readonly auditLogger = new Logger('SettlementAudit');
   private expirySweep?: NodeJS.Timeout;
 
   constructor(
@@ -208,14 +203,32 @@ export class GameSessionsService
     return savedGameSession;
   }
 
-  async findAll(limit: number = 20, offset: number = 0): Promise<GameSession[]> {
-  /** Admins see every session; everyone else sees the ones they play in. */
-  async findAll(user: User): Promise<GameSession[]> {
+  /**
+   * Admins see every session; everyone else sees the ones they play in.
+   * Both are paginated.
+   */
+  async findAll(
+    user: User,
+    limit: number = 20,
+    offset: number = 0,
+  ): Promise<GameSession[]> {
     if (user.role === Role.Admin) {
       return this.gameSessionRepository.find({
         relations: ['player'],
+        order: { createdAt: 'DESC' },
+        take: limit,
+        skip: offset,
       });
     }
+
+    return this.gameSessionRepository.find({
+      where: [{ player: { id: user.id } }, { playerTwoId: user.id }],
+      relations: ['player'],
+      order: { createdAt: 'DESC' },
+      take: limit,
+      skip: offset,
+    });
+  }
 
   onApplicationBootstrap(): void {
     this.expirySweep = setInterval(() => {
@@ -354,16 +367,6 @@ export class GameSessionsService
     return gameSession.createdAt.getTime() <= Date.now() - INVITATION_TTL_MS;
   }
 
-  async findAll(): Promise<GameSession[]> {
-    return this.gameSessionRepository.find({
-      where: [{ player: { id: user.id } }, { playerTwoId: user.id }],
-      relations: ['player'],
-      order: { createdAt: 'DESC' },
-      take: limit,
-      skip: offset,
-    });
-  }
-
   /**
    * Loads a session. When `user` is given, it must be one of the session's
    * players or an admin; internal callers that have already decided who may
@@ -417,10 +420,6 @@ export class GameSessionsService
     }
   }
 
-  async getTopScores(
-    limit: number = 10,
-    offset: number = 0,
-  ): Promise<GameSession[]> {
   private assertParticipant(gameSession: GameSession, user: User): void {
     const isParticipant =
       gameSession.player?.id === user.id || gameSession.playerTwoId === user.id;
@@ -430,14 +429,27 @@ export class GameSessionsService
     }
   }
 
-  async getTopScores(limit: number = 10): Promise<GameSession[]> {
-    return this.gameSessionRepository.find({
-      where: { status: GameSessionStatus.COMPLETED },
-      order: { score: 'DESC' },
-      take: limit,
-      skip: offset,
-      relations: ['player'],
-    });
+  /**
+   * Ranks completed sessions by the best score either player posted, so a
+   * high score from player two is not hidden behind player one's.
+   */
+  async getTopScores(
+    limit: number = 10,
+    offset: number = 0,
+  ): Promise<GameSession[]> {
+    return this.gameSessionRepository
+      .createQueryBuilder('session')
+      .leftJoinAndSelect('session.player', 'player')
+      .where('session.status = :status', {
+        status: GameSessionStatus.COMPLETED,
+      })
+      .orderBy(
+        'GREATEST(COALESCE(session.score, 0), COALESCE(session.playerTwoScore, 0))',
+        'DESC',
+      )
+      .take(limit)
+      .skip(offset)
+      .getMany();
   }
 
   async getRecentGames(

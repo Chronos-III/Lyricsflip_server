@@ -84,9 +84,11 @@ export class WagerRefundJob {
         { status: GameSessionStatus.ABANDONED },
       );
 
-      // Notifying both players belongs to the in-app notification system
-      // (issue #168); until that lands, this is the operator-visible record
-      // that it happened.
+      // WagerService.resolveWagerAsDraw emits the terminal `wager.refunded`
+      // (or `wager.failed`) domain event, which the notifications listener
+      // turns into a stored notification for both players and a realtime
+      // push to each user's room. This log stays as the operator-visible
+      // record of the automatic sweep.
       this.logger.log(
         `Wager ${wager.id} (session ${wager.sessionId}) refunded automatically; ` +
           `players ${wager.playerAId} and ${wager.playerBId} never both staked ` +

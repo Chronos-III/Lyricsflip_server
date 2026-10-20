@@ -112,6 +112,15 @@ export class WagerReconcileJob {
         this.logger.error(
           `ALERT: wager ${wager.id} (session ${wager.sessionId}) moved to FAILED after ${state.count} reconcile attempts`,
         );
+
+        // Notify both players that their wager is stuck and needs attention.
+        try {
+          await this.wagerService.notifyWagerOutcome(wager, 'wager.needs_attention');
+        } catch (error) {
+          this.logger.warn(
+            `Failed to notify players of stuck wager ${wager.id}: ${(error as Error).message}`,
+          );
+        }
       }
     }
   }

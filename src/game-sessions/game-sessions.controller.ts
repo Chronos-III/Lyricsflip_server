@@ -57,8 +57,11 @@ export class GameSessionsController {
   })
   @ApiResponse({ status: 200, description: 'List of game sessions.' })
   @ApiResponse({ status: 400, description: 'Invalid pagination values.' })
-  findAll(@Query() { limit, offset }: PaginationQueryDto) {
-    return this.gameSessionsService.findAll(limit, offset);
+  findAll(
+    @GetUser() user: User,
+    @Query() { limit, offset }: PaginationQueryDto,
+  ) {
+    return this.gameSessionsService.findAll(user, limit, offset);
   }
 
   @Get('top-scores')

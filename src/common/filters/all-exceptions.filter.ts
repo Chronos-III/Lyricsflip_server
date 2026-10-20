@@ -121,7 +121,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
    * include table and constraint names) is never returned.
    */
   private handleDatabaseError(
-    error: QueryFailedError & { code?: string },
+    error: QueryFailedError & {
+      code?: string;
+      driverError?: { code?: string };
+    },
     timestamp: string,
     path: string,
     method: string,
@@ -130,7 +133,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = 'Database error occurred';
 
-    switch (error.code) {
+    // TypeORM exposes the driver error either directly on the QueryFailedError
+    // or nested under `driverError`, depending on the driver and version.
+    const code = error.code ?? error.driverError?.code;
+
+    switch (code) {
       case '23505': // unique_violation
         statusCode = HttpStatus.CONFLICT;
         message = 'Resource already exists';
