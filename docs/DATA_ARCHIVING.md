@@ -1,41 +1,43 @@
-Data Archiving Strategy
-This document outlines a strategy for archiving historical data to maintain the performance and cost-effectiveness of the primary production database.
+# Data Archiving Strategy
 
-1. The Goal
-The primary goal is to periodically move old, infrequently accessed data from the production database to a separate, long-term storage system. This keeps the production database lean and fast while ensuring historical data remains accessible if needed.
+This document outlines the retention and archiving strategy for high-volume historical data in the Lyricsflip PostgreSQL database.
 
-2. The Strategy
-The most common approach is to create a scheduled job (e.g., a cron job) that runs a script to perform the "archive and purge" operation.
+## 1. Objectives
 
-The process for a given table (e.g., orders, logs, user_activity) would be:
+- Maintain low query latency on high-frequency tables (`game_rounds`, `game_sessions`, `wagers`).
+- Reduce primary database storage growth and backup snapshot sizes.
+- Preserve audit and analytical records for compliance, dispute resolution, and reporting.
 
-Identify Archivable Data: Define a policy for what constitutes "old" data. For example, any user activity records older than 18 months that belong to inactive users.
+## 2. Table-Specific Retention Policies
 
-Copy to Archive: The script selects all rows matching the archive policy and copies them from the production database to a separate "cold storage" location. This could be:
+| Table | Retention in Primary DB | Archive Policy |
+|---|---|---|
+| `game_rounds` | 90 days after session completion | Export to cold object storage (Parquet/CSV on S3/GCS); purge completed rounds older than 90 days. |
+| `game_sessions` | 180 days after completion or abandonment | Archive completed/abandoned sessions with no open wagers. |
+| `wagers` | 365 days after terminal state (`SETTLED`, `REFUNDED`, `FAILED`) | Retain financial records on-chain and in archival cold storage for tax/compliance purposes. |
+| `audit_logs` | 180 days in primary database | Stream to cold storage or log aggregator (e.g. OpenSearch / BigQuery) for long-term retention. |
+| `refresh_tokens` | Immediate deletion upon revocation or expiration | Scheduled cleanup job purges expired and revoked tokens automatically. |
 
-A separate, cheaper PostgreSQL database optimized for large-scale storage.
+## 3. Recommended Archive & Purge Procedure
 
-A data warehouse like Google BigQuery or Amazon Redshift.
+A monthly or weekly maintenance script executes:
 
-Flat files (e.g., CSV or Parquet format) stored in a cloud storage bucket like Amazon S3 or Google Cloud Storage.
+```sql
+-- 1. Export rounds from completed sessions older than 90 days
+COPY (
+  SELECT r.* FROM game_rounds r
+  JOIN game_sessions s ON r."sessionId" = s.id
+  WHERE s.status IN ('COMPLETED', 'ABANDONED')
+    AND s."updatedAt" < NOW() - INTERVAL '90 days'
+) TO PROGRAM 'gzip > /archive/game_rounds_$(date +%Y%m%d).csv.gz' WITH CSV HEADER;
 
-Verify the Copy: Before deleting anything, the script must verify that the data was copied to the archive location successfully and is fully intact.
+-- 2. Verify export checksum, then purge
+DELETE FROM game_rounds
+WHERE "sessionId" IN (
+  SELECT id FROM game_sessions
+  WHERE status IN ('COMPLETED', 'ABANDONED')
+    AND "updatedAt" < NOW() - INTERVAL '90 days'
+);
+```
 
-Purge from Production: Once the copy is verified, the script deletes the archived rows from the production database table.
-
-3. Example Workflow (Archiving User Logs)
-Let's say we want to archive user logs older than 2 years.
-
-A scheduled script runs once a month.
-
-SQL Query to select data:
-
-SELECT * FROM user_logs WHERE created_at < NOW() - INTERVAL '2 years';
-
-The script takes the result of this query and inserts it into an archived_user_logs table in a separate "archive" database.
-
-After verifying the data integrity in the archive, it runs the delete command on the production database:
-
-DELETE FROM user_logs WHERE created_at < NOW() - INTERVAL '2 years';
-
-This process ensures the production user_logs table remains at a manageable size, directly contributing to sustained application performance.
+Always execute purges in bounded batches during off-peak hours to avoid prolonged table locks.
