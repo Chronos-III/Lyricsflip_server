@@ -4,6 +4,8 @@ import { LyricsService } from 'src/lyrics/lyrics.service';
 import { CreateLyricsDto } from 'src/lyrics/dto/create-lyrics.dto';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
+import { AdminUserQueryDto } from './dto/admin-user-query.dto';
+import { AdminLyricQueryDto } from './dto/admin-lyric-query.dto';
 
 export interface LyricsImportRowReport {
   row: number;
@@ -23,7 +25,7 @@ export interface LyricsImportReport {
 
 export interface PaginatedResult<T> {
   data: T[];
-  meta: { total: number; page: number; limit: number };
+  meta: { total: number; limit: number; offset: number };
 }
 
 @Injectable()
@@ -34,17 +36,15 @@ export class AdminService {
   ) {}
 
   async findAllUsers(
-    page = 1,
-    limit = 20,
-    sortBy?: string,
-    sortOrder: 'ASC' | 'DESC' = 'DESC',
+    query: AdminUserQueryDto,
   ): Promise<PaginatedResult<unknown>> {
-    const offset = (page - 1) * limit;
+    const limit = query.limit ?? 20;
+    const offset = query.offset ?? 0;
     const [data, total] = await Promise.all([
-      this.usersService.findAll(limit, offset, sortBy, sortOrder),
+      this.usersService.findAll(limit, offset),
       this.usersService.count(),
     ]);
-    return { data, meta: { total, page, limit } };
+    return { data, meta: { total, limit, offset } };
   }
 
   async deleteUser(id: string) {
@@ -53,27 +53,21 @@ export class AdminService {
   }
 
   async findAllLyrics(
-    page = 1,
-    limit = 20,
-    sortBy?: string,
-    sortOrder: 'ASC' | 'DESC' = 'DESC',
-    status?: 'active' | 'inactive',
+    query: AdminLyricQueryDto,
   ): Promise<PaginatedResult<unknown>> {
-    const offset = (page - 1) * limit;
-    const isActive = status === 'inactive' ? false : status === 'active' ? true : undefined;
+    const limit = query.limit ?? 20;
+    const offset = query.offset ?? 0;
+    const isActive =
+      query.status === 'inactive'
+        ? false
+        : query.status === 'active'
+          ? true
+          : undefined;
     const [data, total] = await Promise.all([
-      this.lyricsService.findAll(
-        undefined,
-        undefined,
-        limit,
-        offset,
-        sortBy,
-        sortOrder,
-        isActive,
-      ),
+      this.lyricsService.findAll(limit, offset, query.sortBy, query.sortOrder),
       this.lyricsService.count(isActive),
     ]);
-    return { data, meta: { total, page, limit } };
+    return { data, meta: { total, limit, offset } };
   }
 
   deleteLyric(id: number) {
@@ -93,6 +87,7 @@ export class AdminService {
   async importLyrics(
     file: { buffer: Buffer; originalname?: string; mimetype?: string },
     dryRun = false,
+    user?: { id: string; [key: string]: unknown },
   ): Promise<LyricsImportReport> {
     if (!file || !file.buffer) {
       throw new BadRequestException('A CSV or JSON file is required');
@@ -146,11 +141,11 @@ export class AdminService {
       }
 
       if (existing) {
-        await this.lyricsService.update(existing.id, dto);
+        await this.lyricsService.update(existing.id, dto, user);
         report.updated++;
         report.rows.push({ row: rowNumber, status: 'updated' });
       } else {
-        await this.lyricsService.create(dto);
+        await this.lyricsService.create(dto, user);
         report.created++;
         report.rows.push({ row: rowNumber, status: 'created' });
       }

@@ -6,10 +6,22 @@ import { User, MusicGenre, MusicDecade, UserLevel } from './entities/user.entity
 import { UpdateUserPreferencesDto } from './dto/update-user-preferences.dto';
 import { Repository } from 'typeorm';
 import { Cache } from 'cache-manager';
-import { ConflictException, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  ConflictException,
+  NotFoundException,
+  BadRequestException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Role } from '../auth/roles/role.enum';
 import { Wager, WagerStatus } from '../tokens/entities/wager.entity';
 import { cacheConfig } from '../config/cache.config';
+import * as bcrypt from 'bcrypt';
+import { TokenRevocationService } from '../auth/token-revocation.service';
+
+jest.mock('bcrypt', () => ({
+  compare: jest.fn(),
+  hash: jest.fn(),
+}));
 
 describe('UsersService', () => {
   let service: UsersService;
@@ -34,6 +46,11 @@ describe('UsersService', () => {
     del: jest.fn(),
   };
 
+  const mockTokenRevocationService = {
+    revokeAllForUser: jest.fn(),
+    revokeAllUserTokens: jest.fn(),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -49,6 +66,10 @@ describe('UsersService', () => {
         {
           provide: CACHE_MANAGER,
           useValue: mockCacheManager,
+        },
+        {
+          provide: TokenRevocationService,
+          useValue: mockTokenRevocationService,
         },
       ],
     }).compile();
@@ -108,6 +129,73 @@ describe('UsersService', () => {
         ConflictException,
       );
       expect(mockUserRepository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deleteAccount', () => {
+    const mockUser: User = {
+      id: 'user-123',
+      email: 'test@example.com',
+      username: 'testuser',
+      name: 'Test User',
+      passwordHash: 'hashedpassword',
+      xp: 100,
+      level: 2,
+      levelTitle: UserLevel.GOSSIP_ROOKIE,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      role: Role.User,
+      isActive: true,
+      mockBalance: '1000000000',
+      preferredGenre: undefined,
+      preferredDecade: undefined,
+      gameSessions: [],
+    };
+
+    it('throws UnauthorizedException and changes nothing when the password is wrong', async () => {
+      mockUserRepository.findOne.mockResolvedValue({ ...mockUser });
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+      const removeSpy = jest.spyOn(service, 'remove');
+
+      await expect(
+        service.deleteAccount('user-123', 'wrong-password'),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(removeSpy).not.toHaveBeenCalled();
+      expect(mockUserRepository.save).not.toHaveBeenCalled();
+      expect(mockUserRepository.remove).not.toHaveBeenCalled();
+      expect(
+        mockTokenRevocationService.revokeAllForUser,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the user does not exist', async () => {
+      mockUserRepository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.deleteAccount('missing', 'password'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('verifies the password, anonymizes the user and revokes tokens', async () => {
+      mockUserRepository.findOne.mockResolvedValue({ ...mockUser });
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+      mockWagerRepository.findOne.mockResolvedValue(null);
+      mockUserRepository.save.mockImplementation((u) => Promise.resolve(u));
+
+      const result = await service.deleteAccount('user-123', 'correct-password');
+
+      expect(bcrypt.compare).toHaveBeenCalledWith(
+        'correct-password',
+        mockUser.passwordHash,
+      );
+      expect(mockUserRepository.save).toHaveBeenCalled();
+      const saved = mockUserRepository.save.mock.calls[0][0];
+      expect(saved.isActive).toBe(false);
+      expect(
+        mockTokenRevocationService.revokeAllForUser,
+      ).toHaveBeenCalledWith('user-123');
+      expect(result.message).toContain('deactivated');
     });
   });
 
@@ -224,7 +312,12 @@ describe('UsersService', () => {
       const cachedData = { data: [], meta: {} };
       mockCacheManager.get.mockResolvedValue(cachedData);
 
-      const result = await service.getLeaderboard(10, 0, 'xp', 'DESC');
+      const result = await service.getLeaderboard({
+        limit: 10,
+        offset: 0,
+        sortBy: 'xp',
+        order: 'DESC',
+      });
 
       expect(mockCacheManager.get).toHaveBeenCalledWith('leaderboard:xp:DESC:10:0');
       expect(result).toEqual(cachedData);
@@ -234,7 +327,12 @@ describe('UsersService', () => {
       mockCacheManager.get.mockResolvedValue(null);
       mockUserRepository.findAndCount.mockResolvedValue([[], 0]);
 
-      const result = await service.getLeaderboard(10, 0, 'xp', 'DESC');
+      const result = await service.getLeaderboard({
+        limit: 10,
+        offset: 0,
+        sortBy: 'xp',
+        order: 'DESC',
+      });
 
       expect(mockUserRepository.findAndCount).toHaveBeenCalled();
       expect(mockCacheManager.set).toHaveBeenCalled();
@@ -245,7 +343,12 @@ describe('UsersService', () => {
       mockCacheManager.get.mockResolvedValue(null);
       mockUserRepository.findAndCount.mockResolvedValue([[], 0]);
 
-      await service.getLeaderboard(10, 0, 'xp', 'DESC');
+      await service.getLeaderboard({
+        limit: 10,
+        offset: 0,
+        sortBy: 'xp',
+        order: 'DESC',
+      });
 
       // cache-manager v7 TTLs are milliseconds; 30 would expire in 30 ms.
       expect(cacheConfig.leaderboardTtlMs).toBe(30_000);
@@ -257,15 +360,49 @@ describe('UsersService', () => {
     });
 
     it('should throw BadRequestException for invalid limit', async () => {
-      await expect(service.getLeaderboard(-1, 0, 'xp', 'DESC'))
+      await expect(
+        service.getLeaderboard({
+          limit: -1,
+          offset: 0,
+          sortBy: 'xp',
+          order: 'DESC',
+        }),
+      )
         .rejects
         .toThrow(BadRequestException);
     });
 
     it('should throw BadRequestException for invalid sort field', async () => {
-      await expect(service.getLeaderboard(10, 0, 'invalid', 'DESC'))
+      await expect(
+        service.getLeaderboard({
+          limit: 10,
+          offset: 0,
+          sortBy: 'invalid',
+          order: 'DESC',
+        }),
+      )
         .rejects
         .toThrow(BadRequestException);
+    });
+
+    it('should include myRank when a current user id is provided', async () => {
+      mockCacheManager.get.mockResolvedValue(null);
+      mockUserRepository.findAndCount.mockResolvedValue([[], 0]);
+      mockUserRepository.findOne.mockResolvedValue({
+        id: 'user-123',
+        xp: 100,
+      });
+
+      const result = await service.getLeaderboard({
+        limit: 10,
+        offset: 0,
+        sortBy: 'xp',
+        order: 'DESC',
+        currentUserId: 'user-123',
+      });
+
+      expect(result).toBeDefined();
+      expect(result).toHaveProperty('myRank');
     });
   });
 });

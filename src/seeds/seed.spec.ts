@@ -1,40 +1,45 @@
-import { NestFactory } from '@nestjs/core';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { User } from 'src/users/entities/user.entity';
 import { Lyrics } from 'src/lyrics/entities/lyrics.entity';
+import { Role } from 'src/common/enums/role.enum';
 
-jest.mock('@nestjs/core', () => ({
-  NestFactory: {
-    createApplicationContext: jest.fn(),
-  },
-}));
+jest.mock('typeorm', () => {
+  const actual = jest.requireActual('typeorm');
+  return {
+    ...actual,
+    DataSource: jest.fn(),
+  };
+});
 
 describe('Seed Script', () => {
   let mockUserRepo: Partial<Repository<User>>;
   let mockLyricsRepo: Partial<Repository<Lyrics>>;
-  let mockApp: any;
+  let mockDataSource: any;
 
   beforeEach(() => {
     mockUserRepo = {
       findOne: jest.fn(),
       create: jest.fn((entity: any) => entity as User) as any,
-      save: (jest.fn(async (entity: any) => ({ id: 'user-1', ...entity })) as any)
+      save: (jest.fn(async (entity: any) => ({ id: 'user-1', ...entity })) as any),
     };
 
     mockLyricsRepo = {
       findOne: jest.fn(),
-      save: (jest.fn(async (entity: any) => ({ id: 'user-1', ...entity })) as any)
+      create: jest.fn((entity: any) => entity as Lyrics) as any,
+      save: (jest.fn(async (entity: any) => ({ id: 'lyrics-1', ...entity })) as any),
     };
 
-    mockApp = {
-      get: jest.fn((token) => {
-        if (token === 'UserRepository') return mockUserRepo;
-        if (token === 'LyricsRepository') return mockLyricsRepo;
+    mockDataSource = {
+      getRepository: jest.fn((entity) => {
+        if (entity === User) return mockUserRepo;
+        if (entity === Lyrics) return mockLyricsRepo;
+        return undefined;
       }),
-      close: jest.fn(),
+      initialize: jest.fn().mockResolvedValue(undefined),
+      destroy: jest.fn().mockResolvedValue(undefined),
     };
 
-    (NestFactory.createApplicationContext as jest.Mock).mockResolvedValue(mockApp);
+    (DataSource as unknown as jest.Mock).mockImplementation(() => mockDataSource);
   });
 
   afterEach(() => {
@@ -45,7 +50,7 @@ describe('Seed Script', () => {
     // Mock that no admin exists initially
     (mockUserRepo.findOne as jest.Mock).mockResolvedValueOnce(null);
 
-    // Mock that no lyrics exist
+    // Mock that no lyrics exist for any (artist, songTitle) pair
     (mockLyricsRepo.findOne as jest.Mock).mockResolvedValue(null);
 
     // Import the bootstrap function from your script
@@ -61,10 +66,19 @@ describe('Seed Script', () => {
         email: 'admin@lyricflip.local',
         username: 'seedadmin',
         name: 'Seed Admin',
+        role: Role.Admin,
       }),
     );
 
     expect(mockUserRepo.save).toHaveBeenCalled();
+
+    // Lyrics are upserted keyed on (artist, songTitle)
+    expect(mockLyricsRepo.findOne).toHaveBeenCalledWith({
+      where: {
+        artist: expect.any(String),
+        songTitle: expect.any(String),
+      },
+    });
 
     expect(mockLyricsRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -72,16 +86,19 @@ describe('Seed Script', () => {
         createdBy: { id: 'user-1' },
         createdAt: expect.any(Date),
         genre: expect.any(String),
+        artist: expect.any(String),
+        songTitle: expect.any(String),
       }),
     );
 
-    expect(mockApp.close).toHaveBeenCalled();
+    expect(mockDataSource.destroy).toHaveBeenCalled();
   });
 
   it('should not create admin if it exists', async () => {
     (mockUserRepo.findOne as jest.Mock).mockResolvedValueOnce({
       id: 'admin-id',
       email: 'admin@lyricflip.local',
+      role: Role.Admin,
     });
 
     const { bootstrap }: any = await import('./seed');

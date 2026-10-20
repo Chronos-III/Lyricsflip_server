@@ -8,11 +8,15 @@ describe('AdminService', () => {
 
   const mockUsersService = {
     findAll: jest.fn(),
+    count: jest.fn(),
     remove: jest.fn(),
   };
 
   const mockLyricsService = {
     findAll: jest.fn(),
+    count: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
     remove: jest.fn(),
   };
 
@@ -37,9 +41,38 @@ describe('AdminService', () => {
   it('should list users through the users service', async () => {
     const users = [{ id: 'user-1' }];
     mockUsersService.findAll.mockResolvedValue(users);
+    mockUsersService.count.mockResolvedValue(1);
 
-    await expect(service.findAllUsers()).resolves.toEqual(users);
-    expect(mockUsersService.findAll).toHaveBeenCalled();
+    await expect(service.findAllUsers({})).resolves.toEqual({
+      data: users,
+      meta: { total: 1, limit: 20, offset: 0 },
+    });
+    expect(mockUsersService.findAll).toHaveBeenCalledWith(20, 0, undefined, undefined);
+    expect(mockUsersService.count).toHaveBeenCalled();
+  });
+
+  it('should paginate users and report the correct meta.total', async () => {
+    const users = [{ id: 'user-11' }];
+    mockUsersService.findAll.mockResolvedValue(users);
+    mockUsersService.count.mockResolvedValue(42);
+
+    const result = await service.findAllUsers({
+      limit: 10,
+      offset: 10,
+      sortBy: 'createdAt',
+      sortOrder: 'ASC',
+    });
+
+    expect(mockUsersService.findAll).toHaveBeenCalledWith(
+      10,
+      10,
+      'createdAt',
+      'ASC',
+    );
+    expect(result).toEqual({
+      data: users,
+      meta: { total: 42, limit: 10, offset: 10 },
+    });
   });
 
   it('should report the message returned when deleting a user', async () => {
@@ -60,9 +93,73 @@ describe('AdminService', () => {
   it('should list lyrics through the lyrics service', async () => {
     const lyrics = [{ id: 1 }];
     mockLyricsService.findAll.mockResolvedValue(lyrics);
+    mockLyricsService.count.mockResolvedValue(1);
 
-    await expect(service.findAllLyrics()).resolves.toEqual(lyrics);
-    expect(mockLyricsService.findAll).toHaveBeenCalled();
+    await expect(service.findAllLyrics({})).resolves.toEqual({
+      data: lyrics,
+      meta: { total: 1, limit: 20, offset: 0 },
+    });
+    expect(mockLyricsService.findAll).toHaveBeenCalledWith(
+      20,
+      0,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(mockLyricsService.count).toHaveBeenCalled();
+  });
+
+  it('should filter lyrics by status=inactive', async () => {
+    const lyrics = [{ id: 2, isActive: false }];
+    mockLyricsService.findAll.mockResolvedValue(lyrics);
+    mockLyricsService.count.mockResolvedValue(1);
+
+    const result = await service.findAllLyrics({ status: 'inactive' });
+
+    expect(mockLyricsService.findAll).toHaveBeenCalledWith(
+      20,
+      0,
+      undefined,
+      undefined,
+      false,
+    );
+    expect(result.data).toEqual(lyrics);
+    expect(result.meta.total).toBe(1);
+  });
+
+  it('should not filter lyrics by active state when status=all', async () => {
+    mockLyricsService.findAll.mockResolvedValue([]);
+    mockLyricsService.count.mockResolvedValue(0);
+
+    await service.findAllLyrics({ status: 'all' });
+
+    expect(mockLyricsService.findAll).toHaveBeenCalledWith(
+      20,
+      0,
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
+  it('should set createdBy on imported lyrics', async () => {
+    const dto = { title: 'Song', content: 'Lyrics' };
+    const admin = { id: 'admin-1' } as any;
+    mockLyricsService.create.mockResolvedValue({ id: 1, ...dto });
+
+    await service.importLyrics(dto as any, admin);
+
+    expect(mockLyricsService.create).toHaveBeenCalledWith(dto, admin);
+  });
+
+  it('should pass the acting admin through on lyric updates', async () => {
+    const dto = { title: 'Updated' };
+    const admin = { id: 'admin-1' } as any;
+    mockLyricsService.update.mockResolvedValue({ id: 1, ...dto });
+
+    await service.updateLyric(1, dto as any, admin);
+
+    expect(mockLyricsService.update).toHaveBeenCalledWith(1, dto, admin);
   });
 
   it('should delete lyrics by numeric id', async () => {

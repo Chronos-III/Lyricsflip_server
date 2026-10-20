@@ -150,6 +150,18 @@ export class LyricsService {
     return results;
   }
 
+  /**
+   * Count lyrics, optionally filtered by active state. Used by the admin
+   * listing to populate pagination metadata.
+   */
+  async count(isActive?: boolean): Promise<number> {
+    if (isActive === undefined) {
+      return this.lyricsRepository.count();
+    }
+
+    return this.lyricsRepository.count({ where: { isActive } });
+  }
+
   async findOne(id: number): Promise<Lyrics> {
     // Validate ID
     if (!id || id <= 0) {

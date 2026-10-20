@@ -13,7 +13,7 @@ describe('XpLevelService', () => {
   let service: XpLevelService;
 
   beforeEach(() => {
-    service = new XpLevelService();
+    service = makeService();
   });
 
   // -------------------------------------------------------------------------

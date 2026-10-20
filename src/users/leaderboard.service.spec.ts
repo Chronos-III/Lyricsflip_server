@@ -47,14 +47,56 @@ describe('UsersService - Leaderboard', () => {
   });
 
   it('should return leaderboard with rank and meta', async () => {
-    const leaderboard = await service.getLeaderboard(3, 0, 'xp', 'DESC');
+    const leaderboard = await service.getLeaderboard({
+      limit: 3,
+      offset: 0,
+      sort: 'xp',
+      order: 'DESC',
+    });
     expect(leaderboard.data).toHaveLength(3);
     expect(leaderboard.data[0]).toMatchObject({ username: 'alice', xp: 100, rank: 1 });
-    expect(leaderboard.meta).toMatchObject({ total: 3, limit: 3, offset: 0, sort: 'xp', order: 'DESC' });
+    expect(leaderboard.meta).toMatchObject({
+      total: 3,
+      limit: 3,
+      offset: 0,
+      sort: 'xp',
+      order: 'DESC',
+    });
     expect(cacheMock.set).toHaveBeenCalled();
   });
 
+  it('should use a cache key derived from the options object', async () => {
+    await service.getLeaderboard({ limit: 3, offset: 0, sort: 'xp', order: 'DESC' });
+    expect(cacheMock.get).toHaveBeenCalledWith(expect.stringContaining('xp'));
+    expect(cacheMock.set).toHaveBeenCalledWith(
+      expect.stringContaining('xp'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('should include myRank when a userId is provided', async () => {
+    const leaderboard = await service.getLeaderboard({
+      limit: 3,
+      offset: 0,
+      sort: 'xp',
+      order: 'DESC',
+      userId: '2',
+    });
+    expect(leaderboard.myRank).toBe(2);
+  });
+
+  it('should not include myRank when no userId is provided', async () => {
+    const leaderboard = await service.getLeaderboard({
+      limit: 3,
+      offset: 0,
+      sort: 'xp',
+      order: 'DESC',
+    });
+    expect(leaderboard.myRank).toBeUndefined();
+  });
+
   it('should throw error for invalid limit', async () => {
-    await expect(service.getLeaderboard(0, 0)).rejects.toThrow();
+    await expect(service.getLeaderboard({ limit: 0, offset: 0 })).rejects.toThrow();
   });
 });
