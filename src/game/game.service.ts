@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Lyrics } from 'src/lyrics/entities/lyrics.entity';
 import { matchGuess, normalizeAnswer } from './guess-matcher';
@@ -15,6 +16,7 @@ import { Genre, isGenre, toGenre } from 'src/lyrics/entities/genre.enum';
 import {
   In,
   IsNull,
+  LessThan,
   MoreThanOrEqual,
   Repository,
   SelectQueryBuilder,
@@ -118,6 +120,13 @@ const ACTIVE_SESSION_STATUSES = [
   GameSessionStatus.IN_PROGRESS,
 ];
 
+/**
+ * Name of the advisory lock guarding the daily `game_rounds` retention job.
+ * The lock is taken with `pg_try_advisory_lock` so only one instance runs the
+ * job at a time (see issue 43).
+ */
+const GAME_ROUNDS_RETENTION_LOCK = 330_075;
+
 @Injectable()
 export class GameLogicService {
   private readonly logger = new Logger(GameLogicService.name);
@@ -138,6 +147,22 @@ export class GameLogicService {
     return (
       this.configService.get<number>('ROUND_ANSWER_WINDOW_SECONDS') ??
       GAME_CONSTANTS.LIMITS.ROUND_ANSWER_WINDOW_SECONDS
+    );
+  }
+
+  /** Days a served lyric is excluded from a player's pool (the seen window). */
+  private get seenWindowDays(): number {
+    return (
+      this.configService.get<number>('GAME_SEEN_WINDOW_DAYS') ??
+      GAME_CONSTANTS.LIMITS.SEEN_WINDOW_DAYS
+    );
+  }
+
+  /** Days a guessed round is kept before it is archived or deleted. */
+  private get roundRetentionDays(): number {
+    return (
+      this.configService.get<number>('GAME_ROUND_RETENTION_DAYS') ??
+      GAME_CONSTANTS.LIMITS.ROUND_RETENTION_DAYS
     );
   }
 
@@ -190,6 +215,100 @@ export class GameLogicService {
     this.events.emit(RealtimeEvent.ROUND_STARTED, payload);
 
     return round;
+  }
+
+  /**
+   * Daily retention job for `game_rounds`.
+   *
+   * - Unguessed rounds older than the seen window are deleted: they no longer
+   *   affect the seen-window query and were never scored.
+   * - Guessed rounds older than `roundRetentionDays` are deleted once
+   *   `game_history` holds the record; otherwise they are moved into the
+   *   `game_rounds_archive` table.
+   *
+   * A Postgres advisory lock ensures only one instance runs the job at a time.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_3AM)
+  async pruneGameRounds(): Promise<void> {
+    const acquired = await this.tryAcquireRetentionLock();
+    if (!acquired) {
+      this.logger.debug('game_rounds retention job already running elsewhere');
+      return;
+    }
+
+    try {
+      const now = Date.now();
+      const seenCutoff = new Date(
+        now - this.seenWindowDays * 24 * 60 * 60 * 1000,
+      );
+      const retentionCutoff = new Date(
+        now - this.roundRetentionDays * 24 * 60 * 60 * 1000,
+      );
+
+      const unguessed = await this.roundRepository.delete({
+        closedAt: IsNull(),
+        issuedAt: LessThan(seenCutoff),
+      });
+
+      const archived = await this.archiveGuessedRounds(retentionCutoff);
+
+      const deleted = await this.roundRepository.delete({
+        closedAt: LessThan(retentionCutoff),
+        issuedAt: LessThan(retentionCutoff),
+      });
+
+      this.logger.log(
+        `game_rounds retention: deleted ${unguessed.affected ?? 0} unguessed, ` +
+          `archived ${archived} guessed, deleted ${deleted.affected ?? 0} archived`,
+      );
+    } catch (error) {
+      this.logger.error('game_rounds retention job failed', error as Error);
+    } finally {
+      await this.releaseRetentionLock();
+    }
+  }
+
+  /**
+   * Moves guessed rounds older than `cutoff` into `game_rounds_archive` when
+   * `game_history` does not already hold the record, then deletes the moved
+   * rows from `game_rounds`. Returns the number of rows archived.
+   */
+  private async archiveGuessedRounds(cutoff: Date): Promise<number> {
+    const result = await this.roundRepository.query(
+      `WITH moved AS (
+         DELETE FROM game_rounds gr
+         WHERE gr.closed_at IS NOT NULL
+           AND gr.issued_at < $1
+           AND NOT EXISTS (
+             SELECT 1 FROM game_history gh
+             WHERE gh.user_id = gr.user_id
+               AND gh.lyric_id = gr.lyric_id
+               AND gh.created_at >= gr.issued_at
+           )
+         RETURNING gr.*
+       )
+       INSERT INTO game_rounds_archive
+       SELECT * FROM moved`,
+      [cutoff],
+    );
+
+    return Array.isArray(result) ? result.length : 0;
+  }
+
+  private async tryAcquireRetentionLock(): Promise<boolean> {
+    const rows: Array<{ locked: boolean }> =
+      await this.roundRepository.query(
+        'SELECT pg_try_advisory_lock($1) AS locked',
+        [GAME_ROUNDS_RETENTION_LOCK],
+      );
+    return rows[0]?.locked === true;
+  }
+
+  private async releaseRetentionLock(): Promise<void> {
+    await this.roundRepository.query(
+      'SELECT pg_advisory_unlock($1)',
+      [GAME_ROUNDS_RETENTION_LOCK],
+    );
   }
 
   /**
@@ -283,248 +402,6 @@ export class GameLogicService {
   }
 
   /**
-   * Reveals the next hint for an open round: the genre plus the number of
-   * words in the song title, then the word counts, then the first letters.
-   *
-   * The decade is deliberately not part of the hint ladder: it is already
-   * shown with the round, so revealing it would charge the player for
-   * information they already had.
-   */
-  async revealHint(userId: string, roundId: string): Promise<RoundHints> {
-    const round = await this.roundRepository.findOne({
-      where: { id: roundId, userId },
-    });
+   * Reveals the next hint for an open round: the genre plus the
 
-    if (!round) {
-      throw new NotFoundException('Round not found');
-    }
-
-    if (round.closedAt) {
-      throw new ConflictException('This round has already been guessed');
-    }
-
-    if (round.expiresAt.getTime() <= Date.now()) {
-      throw new GoneException('This round has expired');
-    }
-
-    const nextLevel = round.hintsUsed + 1;
-
-    if (nextLevel > GAME_CONSTANTS.HINTS.MAX_LEVEL) {
-      throw new BadRequestException('No hints remaining for this round');
-    }
-
-    const lyric = await this.lyricsRepository.findOne({
-      where: { id: round.lyricId },
-    });
-
-    if (!lyric) {
-      throw new NotFoundException('Lyric not found');
-    }
-
-    await this.roundRepository.update(
-      { id: round.id },
-      { hintsUsed: nextLevel },
-    );
-
-    const hints: RoundHints = {
-      level: nextLevel,
-      hintsRemaining: GAME_CONSTANTS.HINTS.MAX_LEVEL - nextLevel,
-      maxPoints: maxRoundPoints(nextLevel),
-    };
-
-    if (nextLevel >= 1) {
-      hints.genre = lyric.genre ?? null;
-      hints.wordCount = {
-        songTitle: countWords(lyric.songTitle),
-        artist: countWords(lyric.artist),
-      };
-    }
-
-    if (nextLevel >= 2) {
-      hints.wordCount = {
-        songTitle: countWords(lyric.songTitle),
-        artist: countWords(lyric.artist),
-      };
-    }
-
-    if (nextLevel >= 3) {
-      hints.firstLetter = {
-        songTitle: firstLetter(lyric.songTitle),
-        artist: firstLetter(lyric.artist),
-      };
-    }
-
-    return hints;
-  }
-
-  /**
-   * Legacy guess check used by {@link GameLogicService.guessRound} and the
-   * older lyric-based endpoints.
-   */
-  async checkGuess(dto: LyricGuessDto): Promise<GuessResult> {
-    const lyric = await this.lyricsRepository.findOne({
-      where: { id: dto.lyricId },
-    });
-
-    if (!lyric) {
-      throw new NotFoundException('Lyric not found');
-    }
-
-    const expected =
-      dto.guessType === 'artist' ? lyric.artist : lyric.songTitle;
-    const isCorrect = matchGuess(dto.guessValue, expected);
-
-    return {
-      isCorrect,
-      correctAnswer: expected,
-      explanation: isCorrect
-        ? 'Correct!'
-        : `Not quite. The answer was "${expected}".`,
-      points: isCorrect ? GAME_CONSTANTS.SCORING.BASE_POINTS : 0,
-    };
-  }
-
-  /**
-   * Returns a random lyric for a new round, honouring the caller's filters and
-   * (unless disabled) the player's genre/decade preferences.
-   */
-  async getRandomLyric(
-    options: RandomLyricOptions = {},
-  ): Promise<GameLyric | null> {
-    const qb = this.lyricsRepository.createQueryBuilder('lyric');
-
-    if (options.category) {
-      qb.andWhere('lyric.category = :category', {
-        category: options.category,
-      });
-    }
-
-    if (options.decade) {
-      qb.andWhere('lyric.decade = :decade', { decade: options.decade });
-    }
-
-    if (options.genre) {
-      qb.andWhere('lyric.genre = :genre', { genre: options.genre });
-    }
-
-    if (options.difficulty) {
-      qb.andWhere('lyric.difficulty = :difficulty', {
-        difficulty: options.difficulty,
-      });
-    }
-
-    if (options.excludeIds?.length) {
-      qb.andWhere('lyric.id NOT IN (:...excludeIds)', {
-        excludeIds: options.excludeIds,
-      });
-    }
-
-    if (options.userId && options.seenWindowDays) {
-      const cutoff = new Date(
-        Date.now() - options.seenWindowDays * 24 * 60 * 60 * 1000,
-      );
-      const seen = await this.roundRepository.find({
-        where: {
-          userId: options.userId,
-          issuedAt: MoreThanOrEqual(cutoff),
-        },
-        select: ['lyricId'],
-      });
-      const seenIds = seen.map((r) => r.lyricId);
-      if (seenIds.length) {
-        qb.andWhere('lyric.id NOT IN (:...seenIds)', { seenIds });
-      }
-    }
-
-    if (!options.ignorePreferences) {
-      if (!options.genre && options.preferredGenre) {
-        qb.andWhere('lyric.genre = :preferredGenre', {
-          preferredGenre: options.preferredGenre,
-        });
-      }
-      if (!options.decade && options.preferredDecade) {
-        qb.andWhere('lyric.decade = :preferredDecade', {
-          preferredDecade: options.preferredDecade,
-        });
-      }
-    }
-
-    qb.orderBy('RANDOM()').limit(1);
-
-    const lyric = await qb.getOne();
-
-    if (!lyric) {
-      return null;
-    }
-
-    return {
-      id: lyric.id,
-      lyricSnippet: lyric.lyricSnippet,
-      songTitle: lyric.songTitle,
-      artist: lyric.artist,
-      category: lyric.category,
-      decade: lyric.decade,
-      genre: lyric.genre,
-    };
-  }
-
-  /**
-   * Ensures the player is an active participant of the given session.
-   */
-  private async assertActiveParticipant(
-    userId: string,
-    sessionId: string,
-  ): Promise<void> {
-    const session = await this.sessionRepository.findOne({
-      where: { id: sessionId },
-    });
-
-    if (!session) {
-      throw new NotFoundException('Session not found');
-    }
-
-    if (!ACTIVE_SESSION_STATUSES.includes(session.status)) {
-      throw new ConflictException('Session is not active');
-    }
-
-    const participants = await this.sessionRepository.manager
-      .getRepository('game_session_players')
-      .findOne({ where: { sessionId, userId } })
-      .catch(() => null);
-
-    if (!participants) {
-      throw new ConflictException('Player is not part of this session');
-    }
-  }
-
-  /** Bumps the session's last-activity timestamp. */
-  private async touchSession(sessionId: string): Promise<void> {
-    await this.sessionRepository.update(
-      { id: sessionId },
-      { lastActivityAt: new Date() },
-    );
-  }
-
-  private emitRoundEnded(
-    round: GameRound,
-    result: Omit<RoundEndedPayload, 'roundId' | 'sessionId' | 'userId'>,
-  ): void {
-    const payload: RoundEndedPayload = {
-      roundId: round.id,
-      sessionId: round.sessionId ?? null,
-      userId: round.userId,
-      ...result,
-    };
-    this.events.emit(RealtimeEvent.ROUND_ENDED, payload);
-  }
-}
-
-/** Counts the whitespace-separated words in a string. */
-function countWords(value: string): number {
-  return value.trim().split(/\s+/).filter(Boolean).length;
-}
-
-/** Returns the first character of a string, uppercased. */
-function firstLetter(value: string): string {
-  return value.trim().charAt(0).toUpperCase();
-}
+/* … truncated 6620 chars — edit only what you need near the top … */
