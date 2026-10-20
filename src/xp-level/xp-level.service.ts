@@ -102,14 +102,41 @@ export class XpLevelService {
    *
    * This is the single authoritative path for XP updates — call it from
    * any game controller or gateway that resolves a correct answer.
+   *
+   * The XP increment is performed atomically in the database so concurrent
+   * awards are never lost, and only the `xp`, `level` and `levelTitle`
+   * columns are touched — unrelated user columns are never overwritten.
    */
   async handleCorrectGuess(userId: string): Promise<XpResult> {
-    const user = await this.userRepo.findOneOrFail({ where: { id: userId } });
-    const result = this.calculateXpGain(user.xp, 1);
-    user.xp = result.xp;
-    user.level = result.level;
-    user.levelTitle = result.levelTitle;
-    await this.userRepo.save(user);
-    return result;
+    // Atomically increment XP and read back the new total. This avoids the
+    // read-modify-write race where two concurrent awards both read the same
+    // starting XP and one award is lost.
+    const rows: Array<{ xp: number; level: number }> =
+      await this.userRepo.query(
+        'UPDATE users SET xp = xp + $1 WHERE id = $2 RETURNING xp, level',
+        [XP_PER_CORRECT_GUESS, userId],
+      );
+
+    const updated = rows[0];
+    if (!updated) {
+      // No matching user — surface the same error shape as findOneOrFail.
+      await this.userRepo.findOneOrFail({ where: { id: userId } });
+      throw new Error(`User ${userId} not found`);
+    }
+
+    const newXp = Number(updated.xp);
+    const { level, levelTitle } = getLevelFromXp(newXp);
+
+    // Only update the level columns when the level actually changed, and guard
+    // with `level < $new` so a concurrent award that already advanced the level
+    // cannot be regressed by a stale write.
+    if (level > Number(updated.level)) {
+      await this.userRepo.query(
+        'UPDATE users SET level = $1, levelTitle = $2 WHERE id = $3 AND level < $1',
+        [level, levelTitle, userId],
+      );
+    }
+
+    return { xp: newXp, level, levelTitle };
   }
 }
