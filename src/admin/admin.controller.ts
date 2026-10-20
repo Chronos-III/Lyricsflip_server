@@ -12,6 +12,7 @@ import {
   UploadedFile,
   Body,
   SerializeOptions,
+  NotFoundException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
@@ -32,6 +33,10 @@ import { AuditInterceptor } from '../audit/audit.interceptor';
 import { Audited } from '../audit/decorators/audited.decorator';
 import { UserGroup } from '../users/user-serialization';
 import { ImportLyricsDto } from './dto/import-lyrics.dto';
+import {
+  GrantMockBalanceDto,
+  GrantMockBalanceMode,
+} from './dto/grant-mock-balance.dto';
 import { AdminUserQueryDto } from './dto/admin-user-query.dto';
 import { AdminLyricQueryDto } from './dto/admin-lyric-query.dto';
 import { GetUser } from '../auth/decorators/get-user.decorator';
@@ -69,6 +74,28 @@ export class AdminController {
   @Audited({ action: 'admin.user.delete', targetType: 'user' })
   deleteUser(@Param('id', ParseUUIDPipe) id: string) {
     return this.adminService.deleteUser(id);
+  }
+
+  @Post('users/:id/mock-balance')
+  @ApiOperation({
+    summary: 'Grant (add or set) a user mock balance (mock settlement mode only)',
+  })
+  @ApiBody({ type: GrantMockBalanceDto })
+  @ApiResponse({ status: 201, description: 'Mock balance updated.' })
+  @ApiResponse({ status: 404, description: 'Not available outside mock mode.' })
+  @Audited({ action: 'admin.user.mock-balance', targetType: 'user' })
+  grantMockBalance(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: GrantMockBalanceDto,
+  ) {
+    if (process.env.STELLAR_SETTLEMENT_MODE !== 'mock') {
+      throw new NotFoundException();
+    }
+    return this.adminService.grantMockBalance(
+      id,
+      dto.amount,
+      dto.mode ?? GrantMockBalanceMode.ADD,
+    );
   }
 
   // --- Lyrics Management ---

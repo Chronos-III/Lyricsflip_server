@@ -35,6 +35,7 @@ import { Role } from 'src/auth/roles/role.enum';
 import { GetUser } from 'src/auth/decorators/user.decorator';
 import { Lyrics } from './entities/lyrics.entity';
 import { AdminLyricDto, PlayerLyricDto } from './dto/lyric-response.dto';
+import { normalizeDecade } from '../game/progression.util';
 
 /**
  * Only admins see a lyric's answer. Every other caller gets the playable
@@ -80,8 +81,8 @@ export class LyricsController {
     name: 'decade',
     required: false,
     description:
-      'Filter by decade (4-digit year in decades: 1990, 2000, 2010, etc.)',
-    type: 'number',
+      'Filter by decade (e.g. 1990 or 1990s; both resolve to the 1990s)',
+    type: 'string',
   })
   @ApiResponse({ status: 200, description: 'Array of filtered lyrics.' })
   @ApiResponse({ status: 404, description: 'No data matches your search.' })
@@ -91,8 +92,8 @@ export class LyricsController {
     @Query('genre') genre?: string,
     @Query('decade') decade?: string,
   ) {
-    const decadeNum = decade ? Number.parseInt(decade, 10) : undefined;
-    const lyrics = await this.lyricsService.findAll(genre, decadeNum);
+    const normalizedDecade = decade ? normalizeDecade(decade) : undefined;
+    const lyrics = await this.lyricsService.findAll(genre, normalizedDecade);
     return lyrics.map((lyric) => forCaller(lyric, user));
   }
 
@@ -116,11 +117,11 @@ export class LyricsController {
     @Query('decade') decade?: string,
   ) {
     const countNum = count ? Number.parseInt(count, 10) : 1;
-    const decadeNum = decade ? Number.parseInt(decade, 10) : undefined;
+    const normalizedDecade = decade ? normalizeDecade(decade) : undefined;
     const lyrics = await this.lyricsService.getRandomLyrics(
       countNum,
       genre,
-      decadeNum,
+      normalizedDecade,
     );
     return lyrics.map((lyric) => forCaller(lyric, user));
   }
@@ -141,13 +142,18 @@ export class LyricsController {
   @ApiQuery({
     name: 'decade',
     required: true,
-    description: 'Decade to filter by',
+    description: 'Decade to filter by (e.g. 1990 or 1990s)',
   })
   @Get('decade/:decade')
   async getLyricsByDecade(
     @Param('decade') decade: string,
     @GetUser() user: User,
   ) {
+    const normalizedDecade = normalizeDecade(decade);
+    const lyrics = await this.lyricsService.getLyricsByCategory(
+      'decade',
+      normalizedDecade,
+    );
     const decadeNum = Number.parseInt(decade, 10);
     const lyrics = await this.lyricsService.getLyricsByCategory(decadeNum);
     return lyrics.map((lyric) => forCaller(lyric, user));

@@ -1,6 +1,5 @@
 import { Logger, Module } from '@nestjs/common';
 import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
-import { ScheduleModule } from '@nestjs/schedule';
 import { Repository } from 'typeorm';
 import { Wager } from './entities/wager.entity';
 import { User } from '../users/entities/user.entity';
@@ -23,15 +22,13 @@ import type { StellarConfig } from '../stellar/stellar.config';
   imports: [
     TypeOrmModule.forFeature([Wager, User, GameSession]),
     StellarModule,
-    ScheduleModule.forRoot(),
   ],
   providers: [
-    MockTokenService,
-    StellarTokenService,
     {
       // Which settlement backend the game runs on is a deployment decision, not
       // a code one: the same wager flow drives Postgres rows in development and
-      // the Soroban escrow contract in production.
+      // the Soroban escrow contract in production. Only the selected backend is
+      // constructed here, so mock mode never builds a StellarTokenService.
       provide: TOKEN_SERVICE,
       inject: [
         STELLAR_CONFIG,

@@ -1,6 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { GameController } from './game.controller';
 import { GameLogicService } from './game.service';
+import { Genre } from '../lyrics/entities/genre.enum';
+import { MusicGenre } from '../users/entities/user.entity';
 
 describe('GameController', () => {
   let controller: GameController;
@@ -53,6 +55,72 @@ describe('GameController', () => {
     expect(result).toMatchObject({ roundId: 'round-9', expiresAt, id: 7 });
     expect(result).not.toHaveProperty('artist');
     expect(result).not.toHaveProperty('songTitle');
+  });
+
+  it('only forwards a preferred genre that is a valid lyric genre', async () => {
+    const service = controller[
+      'gameLogicService'
+    ] as jest.Mocked<GameLogicService>;
+    service.getRandomLyric.mockResolvedValue({
+      id: 7,
+      lyricSnippet: 'snippet',
+      songTitle: 'Secret Song',
+      artist: 'Secret Artist',
+    });
+    service.issueRound.mockResolvedValue({ id: 'round-9', expiresAt: new Date() } as any);
+
+    await controller.getRandomLyric({}, {
+      id: 'player-1',
+      preferredGenre: MusicGenre.POP,
+    } as any);
+
+    expect(service.getRandomLyric).toHaveBeenCalledWith(
+      expect.objectContaining({ genre: Genre.POP }),
+    );
+  });
+
+  it('does not forward a preferred genre that is not a valid lyric genre', async () => {
+    const service = controller[
+      'gameLogicService'
+    ] as jest.Mocked<GameLogicService>;
+    service.getRandomLyric.mockResolvedValue({
+      id: 7,
+      lyricSnippet: 'snippet',
+      songTitle: 'Secret Song',
+      artist: 'Secret Artist',
+    });
+    service.issueRound.mockResolvedValue({ id: 'round-9', expiresAt: new Date() } as any);
+
+    await controller.getRandomLyric({}, {
+      id: 'player-1',
+      preferredGenre: MusicGenre.ROCK,
+    } as any);
+
+    const filters = service.getRandomLyric.mock.calls[0][0] as any;
+    expect(filters.genre).toBeUndefined();
+  });
+
+  it('lets a user with each MusicGenre value fetch a lyric', async () => {
+    const service = controller[
+      'gameLogicService'
+    ] as jest.Mocked<GameLogicService>;
+    service.getRandomLyric.mockResolvedValue({
+      id: 7,
+      lyricSnippet: 'snippet',
+      songTitle: 'Secret Song',
+      artist: 'Secret Artist',
+    });
+    service.issueRound.mockResolvedValue({ id: 'round-9', expiresAt: new Date() } as any);
+
+    for (const preferredGenre of Object.values(MusicGenre)) {
+      service.getRandomLyric.mockClear();
+      await expect(
+        controller.getRandomLyric({}, {
+          id: 'player-1',
+          preferredGenre,
+        } as any),
+      ).resolves.toBeDefined();
+    }
   });
 
   it("scores guesses through the caller's round", async () => {
