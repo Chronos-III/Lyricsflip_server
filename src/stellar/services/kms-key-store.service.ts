@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Keypair } from '@stellar/stellar-sdk';
+import { Keypair, Transaction } from '@stellar/stellar-sdk';
 import { IKeyStore } from '../interfaces/key-store.interface';
 
 /**
@@ -63,6 +63,54 @@ export interface RemoteSigner {
   sign(hash: Buffer): Promise<Buffer>;
 }
 
+/**
+ * Abstraction over anything that can sign a Stellar transaction on behalf of
+ * the resolver. Call sites (`EscrowContractService`, `StellarRpcService`)
+ * take a `TransactionSigner` so the same code works with an in-process
+ * `Keypair` (`KeypairSigner`) or a remote KMS/Vault key (`RemoteSigner`).
+ */
+export interface TransactionSigner {
+  /** The signer's Stellar (ed25519) public key, base32 `G...` address. */
+  publicKey(): string;
+
+  /** Attaches this signer's signature to `tx`, mutating it in place. */
+  sign(tx: Transaction): Promise<void>;
+}
+
+/** `TransactionSigner` backed by an in-process `Keypair` (env key store). */
+export class KeypairSigner implements TransactionSigner {
+  constructor(private readonly keypair: Keypair) {}
+
+  publicKey(): string {
+    return this.keypair.publicKey();
+  }
+
+  async sign(tx: Transaction): Promise<void> {
+    tx.sign(this.keypair);
+  }
+}
+
+/**
+ * `TransactionSigner` backed by a remote KMS/Vault key. The private material
+ * never leaves the provider: we ask it to sign the transaction hash and then
+ * attach the returned signature to the transaction ourselves.
+ */
+export class RemoteTransactionSigner implements TransactionSigner {
+  constructor(
+    private readonly remote: RemoteSigner,
+    private readonly publicKey: string,
+  ) {}
+
+  publicKey(): string {
+    return this.publicKey;
+  }
+
+  async sign(tx: Transaction): Promise<void> {
+    const signature = await this.remote.sign(tx.hash());
+    tx.addSignature(this.publicKey, signature.toString('base64'));
+  }
+}
+
 @Injectable()
 export class KmsKeyStore implements IKeyStore {
   readonly name: string;
@@ -80,7 +128,7 @@ export class KmsKeyStore implements IKeyStore {
 
   /**
    * Resolves and caches the resolver's public key. Call this once during
-   * application bootstrap (or lazily on first use) so `getResolverKeypair`
+   * application bootstrap (or lazily on first use) so `getResolverSigner`
    * can stay synchronous, matching the `IKeyStore` contract used by existing
    * call sites.
    */
@@ -96,19 +144,24 @@ export class KmsKeyStore implements IKeyStore {
   }
 
   /**
-   * `IKeyStore` was written around raw `Keypair`s, so existing call sites
-   * expect one back. `KmsKeyStore` cannot hand out a `Keypair` with a private
-   * key it does not have; call sites that need to actually sign with a
-   * remote key must be migrated to `sign(hash)` (see `signHash`) instead of
-   * pulling the secret out of a `Keypair`. Until that migration lands, this
-   * throws rather than silently returning an unusable, keyless `Keypair`.
+   * @deprecated `KmsKeyStore` cannot hand out a `Keypair` with a private key
+   * it does not have. Use {@link getResolverSigner} instead, which returns a
+   * `TransactionSigner` that delegates signing to the remote key.
    */
   getResolverKeypair(): Keypair {
     throw new Error(
-      `${this.name} does not expose a signing Keypair. Use signHash(hash) via ` +
-        'the KEY_STORE provider instead of getResolverKeypair() when ' +
-        'STELLAR_KEY_STORE=kms|vault.',
+      `${this.name} does not expose a signing Keypair. Use getResolverSigner() ` +
+        'instead of getResolverKeypair() when STELLAR_KEY_STORE=kms|vault.',
     );
+  }
+
+  /**
+   * Returns a `TransactionSigner` that signs with the remote resolver key.
+   * This is the abstraction resolver-signed call sites should use so the same
+   * code works with any `IKeyStore` backend.
+   */
+  getResolverSigner(): TransactionSigner {
+    return new RemoteTransactionSigner(this.signer, this.getResolverPublicKey());
   }
 
   /** The resolver's public key, once {@link init} has resolved it. */
