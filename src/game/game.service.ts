@@ -97,7 +97,7 @@ export interface RoundHints {
   hintsRemaining: number;
   /** The most this round can now score. */
   maxPoints: number;
-  decade?: string | null;
+  genre?: string | null;
   wordCount?: { songTitle: number; artist: number };
   firstLetter?: { songTitle: string; artist: string };
 }
@@ -283,14 +283,14 @@ export class GameLogicService {
   }
 
   /**
-   * Reveals the next hint for an open round: the decade, then the word count,
-   * then the first letter. Each hint lowers the points the round can score, so
-   * nothing is revealed for free.
+   * Reveals the next hint for an open round: the genre plus the number of
+   * words in the song title, then the word counts, then the first letters.
    *
-   * Hints are refused for anyone in an active wagered session, since one
-   * player could otherwise buy an edge the other cannot.
+   * The decade is deliberately not part of the hint ladder: it is already
+   * shown with the round, so revealing it would charge the player for
+   * information they already had.
    */
-  async useHint(userId: string, roundId: string): Promise<RoundHints> {
+  async revealHint(userId: string, roundId: string): Promise<RoundHints> {
     const round = await this.roundRepository.findOne({
       where: { id: roundId, userId },
     });
@@ -307,491 +307,224 @@ export class GameLogicService {
       throw new GoneException('This round has expired');
     }
 
-    await this.assertHintsAllowed(userId);
+    const nextLevel = round.hintsUsed + 1;
 
-    if (round.hintsUsed >= GAME_CONSTANTS.LIMITS.MAX_HINTS) {
-      throw new ConflictException('No more hints are available for this round');
-    }
-
-    // Conditional on the count read above, so two simultaneous requests cannot
-    // both take the same hint level (or skip past one).
-    const taken = await this.roundRepository.update(
-      { id: round.id, closedAt: IsNull(), hintsUsed: round.hintsUsed },
-      { hintsUsed: round.hintsUsed + 1 },
-    );
-
-    if (!taken.affected) {
-      throw new ConflictException('This round changed, try the hint again');
+    if (nextLevel > GAME_CONSTANTS.HINTS.MAX_LEVEL) {
+      throw new BadRequestException('No hints remaining for this round');
     }
 
     const lyric = await this.lyricsRepository.findOne({
-      where: { id: round.lyricId, isActive: true },
+      where: { id: round.lyricId },
     });
 
     if (!lyric) {
-      throw new NotFoundException('Round not found');
+      throw new NotFoundException('Lyric not found');
     }
 
-    return this.buildHints(lyric, round.hintsUsed + 1);
-  }
-
-  private buildHints(lyric: Lyrics, level: number): RoundHints {
-    const words = (text: string) =>
-      normalizeAnswer(text).split(' ').filter(Boolean).length;
-    const initial = (text: string) =>
-      normalizeAnswer(text).charAt(0).toUpperCase();
+    await this.roundRepository.update(
+      { id: round.id },
+      { hintsUsed: nextLevel },
+    );
 
     const hints: RoundHints = {
-      level,
-      hintsRemaining: GAME_CONSTANTS.LIMITS.MAX_HINTS - level,
-      maxPoints: maxRoundPoints(level),
-      decade: lyric.decade ?? null,
+      level: nextLevel,
+      hintsRemaining: GAME_CONSTANTS.HINTS.MAX_LEVEL - nextLevel,
+      maxPoints: maxRoundPoints(nextLevel),
     };
 
-    if (level >= 2) {
+    if (nextLevel >= 1) {
+      hints.genre = lyric.genre ?? null;
       hints.wordCount = {
-        songTitle: words(lyric.songTitle),
-        artist: words(lyric.artist),
+        songTitle: countWords(lyric.songTitle),
+        artist: countWords(lyric.artist),
       };
     }
 
-    if (level >= 3) {
+    if (nextLevel >= 2) {
+      hints.wordCount = {
+        songTitle: countWords(lyric.songTitle),
+        artist: countWords(lyric.artist),
+      };
+    }
+
+    if (nextLevel >= 3) {
       hints.firstLetter = {
-        songTitle: initial(lyric.songTitle),
-        artist: initial(lyric.artist),
+        songTitle: firstLetter(lyric.songTitle),
+        artist: firstLetter(lyric.artist),
       };
     }
 
     return hints;
   }
 
-  private async assertHintsAllowed(userId: string): Promise<void> {
-    const wagered = await this.sessionRepository.count({
-      where: [
-        {
-          hasWager: true,
-          status: In(ACTIVE_SESSION_STATUSES),
-          player: { id: userId },
-        },
-        {
-          hasWager: true,
-          status: In(ACTIVE_SESSION_STATUSES),
-          playerTwoId: userId,
-        },
-      ],
+  /**
+   * Legacy guess check used by {@link GameLogicService.guessRound} and the
+   * older lyric-based endpoints.
+   */
+  async checkGuess(dto: LyricGuessDto): Promise<GuessResult> {
+    const lyric = await this.lyricsRepository.findOne({
+      where: { id: dto.lyricId },
     });
 
-    if (wagered > 0) {
-      throw new BadRequestException('Hints are not available in wagered games');
+    if (!lyric) {
+      throw new NotFoundException('Lyric not found');
     }
-  }
 
-  /** A round can only be tied to a session the player is actually playing. */
-  private async assertActiveParticipant(
-    userId: string,
-    sessionId: string,
-  ): Promise<void> {
-    const session = await this.sessionRepository.findOne({
-      where: { id: sessionId, status: In(ACTIVE_SESSION_STATUSES) },
-      relations: { player: true },
-    });
+    const expected =
+      dto.guessType === 'artist' ? lyric.artist : lyric.songTitle;
+    const isCorrect = matchGuess(dto.guessValue, expected);
 
-    if (
-      !session ||
-      (session.player?.id !== userId && session.playerTwoId !== userId)
-    ) {
-      throw new NotFoundException('Session not found');
-    }
-  }
-
-  /** Playing a round counts as activity, so a busy session is never idle. */
-  private async touchSession(sessionId: string): Promise<void> {
-    await this.sessionRepository.update(sessionId, { updatedAt: new Date() });
-  }
-
-  private emitRoundEnded(
-    round: GameRound,
-    outcome: Pick<
-      RoundEndedPayload,
-      'isCorrect' | 'points' | 'speedBonus' | 'timedOut'
-    >,
-  ): void {
-    const payload: RoundEndedPayload = {
-      roundId: round.id,
-      sessionId: round.sessionId ?? null,
-      userId: round.userId,
-      hintsUsed: round.hintsUsed,
-      ...outcome,
+    return {
+      isCorrect,
+      correctAnswer: expected,
+      explanation: isCorrect
+        ? 'Correct!'
+        : `Not quite. The answer was "${expected}".`,
+      points: isCorrect ? GAME_CONSTANTS.SCORING.BASE_POINTS : 0,
     };
-    this.events.emit(RealtimeEvent.ROUND_ENDED, payload);
   }
 
   /**
-   * Returns the IDs of lyrics this player has already been served within the
-   * configured window, so they are not repeated while unseen lyrics remain.
+   * Returns a random lyric for a new round, honouring the caller's filters and
+   * (unless disabled) the player's genre/decade preferences.
    */
-  private async getRecentlySeenLyricIds(
-    userId: string,
-    windowDays: number,
-  ): Promise<number[]> {
-    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
-
-    const rounds = await this.roundRepository.find({
-      where: { userId, issuedAt: MoreThanOrEqual(since) },
-      select: ['lyricId'],
-    });
-
-    return rounds.map((round) => round.lyricId);
-  }
-
-  /**
-   * Fetches a random lyric from the database with optional filtering.
-   *
-   * Preference fallback (issue #176):
-   * When the caller provides no explicit `genre` or `decade` filter and
-   * `ignorePreferences` is not set, the player's `preferredGenre` /
-   * `preferredDecade` are applied as soft filters.  If the preference-filtered
-   * pool is empty we fall back to all lyrics so the player always gets a
-   * result.
-   *
-   * @param options - Filtering options for category, decade, genre, difficulty
-   *   and exclusions
-   * @returns Promise<GameLyric> - Random lyric for the game
-   */
-  async getRandomLyric(options: RandomLyricOptions = {}): Promise<GameLyric> {
-    this.logger.debug(
-      `Fetching random lyric with options: ${JSON.stringify(options)}`,
-    );
-
-    try {
-      // Resolve effective filters, honouring the preference fallback.
-      const effectiveGenre =
-        options.genre ??
-        (!options.ignorePreferences ? options.preferredGenre : undefined);
-
-      const effectiveDecade =
-        options.decade ??
-        (!options.ignorePreferences ? options.preferredDecade : undefined);
-
-      const queryBuilder = this.lyricsRepository
-        .createQueryBuilder('lyrics')
-        .select([
-          'lyrics.id',
-          'lyrics.lyricSnippet',
-          'lyrics.songTitle',
-          'lyrics.artist',
-          'lyrics.category',
-          'lyrics.decade',
-          'lyrics.genre',
-        ]);
-
-      this.applyFilters(queryBuilder, {
-        ...options,
-        genre: effectiveGenre,
-        decade: effectiveDecade,
-      });
-
-      // Exclude previously shown lyrics in the session
-      if (options.excludeIds && options.excludeIds.length > 0) {
-        queryBuilder.andWhere('lyrics.id NOT IN (:...excludeIds)', {
-          excludeIds: options.excludeIds,
-        });
-      }
-
-      // Exclude lyrics this player has already seen within the window.
-      if (options.userId && options.seenWindowDays) {
-        const seenIds = await this.getRecentlySeenLyricIds(
-          options.userId,
-          options.seenWindowDays,
-        );
-
-        if (seenIds.length > 0) {
-          queryBuilder.andWhere('lyrics.id NOT IN (:...seenIds)', {
-            seenIds,
-          });
-        }
-      }
-
-      // Pick a random row without a COUNT + OFFSET scan: order by a random
-      // expression and take the first row.
-      const lyric = await queryBuilder.orderBy('RANDOM()').take(1).getOne();
-
-      if (lyric) {
-        this.logger.debug(`Selected lyric ID: ${lyric.id}`);
-
-        // Increment timesUsed atomically (issue #175) so the count reflects
-        // every serve, even if two requests race.
-        await this.lyricsRepository.increment({ id: lyric.id }, 'timesUsed', 1);
-
-        return {
-          id: lyric.id,
-          lyricSnippet: lyric.lyricSnippet,
-          songTitle: lyric.songTitle,
-          artist: lyric.artist,
-          category: lyric.category,
-          decade: lyric.decade,
-          genre: lyric.genre,
-        };
-      }
-
-      // The pool for the effective filters is exhausted or the preferences
-      // produced no match.  Try falling back in layers:
-      //   1. Drop the seen-window restriction (player exhausted unseen pool).
-      //   2. Drop the preference-derived genre/decade so the player always gets
-      //      a lyric rather than an empty-result error.
-      if (options.userId && options.seenWindowDays) {
-        this.logger.debug(
-          'Unseen lyric pool exhausted, falling back to full pool',
-        );
-        return this.getRandomLyric({
-          ...options,
-          userId: undefined,
-          seenWindowDays: undefined,
-        });
-      }
-
-      // Preferences produced no match — retry without them so the player is
-      // never locked out by their own settings (acceptance criterion #176).
-      const hasPreferenceFilters =
-        !options.ignorePreferences &&
-        ((!options.genre && options.preferredGenre) ||
-          (!options.decade && options.preferredDecade));
-
-      if (hasPreferenceFilters) {
-        this.logger.debug(
-          'Preference-filtered pool empty, retrying without preferences',
-        );
-        return this.getRandomLyric({
-          ...options,
-          preferredGenre: undefined,
-          preferredDecade: undefined,
-        });
-      }
-
-      throw new NotFoundException(
-        'No lyrics found matching the specified criteria',
-      );
-    } catch (error) {
-      this.logger.error('Error fetching random lyric', error.stack);
-      throw error;
-    }
-  }
-
-  /**
-   * Checks if a player's guess is correct
-   * @param guessDto - The guess data containing lyricId, guessType, and guessValue
-   * @returns Promise<GuessResult> - Result of the guess evaluation
-   */
-  async checkGuess(guessDto: LyricGuessDto): Promise<GuessResult> {
-    this.logger.debug(`Checking guess: ${JSON.stringify(guessDto)}`);
-
-    try {
-      // Fetch the lyric from database
-      const lyric = await this.lyricsRepository.findOne({
-        // A deactivated lyric is treated as if it does not exist.
-        where: { id: guessDto.lyricId, isActive: true },
-      });
-
-      if (!lyric) {
-        throw new NotFoundException(
-          `Lyric with ID ${guessDto.lyricId} not found`,
-        );
-      }
-
-      // Get the correct answer based on guess type
-      const correctAnswer =
-        guessDto.guessType === 'artist' ? lyric.artist : lyric.songTitle;
-
-      const { isCorrect, isExactMatch, points } = matchGuess(
-        guessDto.guessValue,
-        correctAnswer,
-      );
-
-      // Generate explanation
-      let explanation = '';
-      if (isCorrect) {
-        if (isExactMatch) {
-          explanation = `Correct! This line is from "${lyric.songTitle}" by ${lyric.artist}.`;
-        } else {
-          explanation = `Close enough! The exact answer is "${correctAnswer}" from "${lyric.songTitle}" by ${lyric.artist}.`;
-        }
-      } else {
-        explanation = `Incorrect. The correct answer is "${correctAnswer}" from "${lyric.songTitle}" by ${lyric.artist}.`;
-      }
-
-      const result: GuessResult = {
-        isCorrect,
-        correctAnswer,
-        explanation,
-        points,
-      };
-
-      this.logger.debug(`Guess result: ${JSON.stringify(result)}`);
-      return result;
-    } catch (error) {
-      this.logger.error('Error checking guess', error.stack);
-      throw error;
-    }
-  }
-
-  /**
-   * Gets multiple random lyrics for batch operations
-   * @param count - Number of lyrics to fetch
-   * @param options - Filtering options
-   * @returns Promise<GameLyric[]> - Array of random lyrics
-   */
-  async getMultipleRandomLyrics(
-    count: number,
+  async getRandomLyric(
     options: RandomLyricOptions = {},
-  ): Promise<GameLyric[]> {
-    this.logger.debug(`Fetching ${count} random lyrics`);
-
-    const lyrics: GameLyric[] = [];
-    const excludeIds = options.excludeIds || [];
-
-    for (let i = 0; i < count; i++) {
-      try {
-        const lyric = await this.getRandomLyric({
-          ...options,
-          excludeIds: [...excludeIds, ...lyrics.map((l) => l.id)],
-        });
-        lyrics.push(lyric);
-      } catch (error) {
-        this.logger.warn(
-          `Could not fetch lyric ${i + 1} of ${count}: ${error.message}`,
-        );
-        break;
-      }
-    }
-
-    return lyrics;
-  }
-
-  /**
-   * Gets statistics about available lyrics
-   * @param options - Optional filtering
-   * @returns Promise with counts and categories
-   */
-  async getLyricStats(options: Partial<RandomLyricOptions> = {}) {
-    this.logger.debug('Fetching lyric statistics');
-
-    try {
-      const queryBuilder = this.lyricsRepository.createQueryBuilder('lyrics');
-      this.applyFilters(queryBuilder, options);
-
-      const [totalCount, categories, decades, genres] = await Promise.all([
-        queryBuilder.getCount(),
-        this.lyricsRepository
-          .createQueryBuilder('lyrics')
-          .select('DISTINCT lyrics.category', 'category')
-          .where('lyrics.category IS NOT NULL')
-          .andWhere('lyrics.isActive = :isActive', { isActive: true })
-          .getRawMany(),
-        this.lyricsRepository
-          .createQueryBuilder('lyrics')
-          .select('DISTINCT lyrics.decade', 'decade')
-          .where('lyrics.decade IS NOT NULL')
-          .andWhere('lyrics.isActive = :isActive', { isActive: true })
-          .orderBy('lyrics.decade', 'ASC')
-          .getRawMany(),
-        this.lyricsRepository
-          .createQueryBuilder('lyrics')
-          .select('DISTINCT lyrics.genre', 'genre')
-          .where('lyrics.genre IS NOT NULL')
-          .andWhere('lyrics.isActive = :isActive', { isActive: true })
-          .getRawMany(),
-      ]);
-
-      return {
-        totalCount,
-        availableCategories: categories.map((c) => c.category).filter(Boolean),
-        availableDecades: decades.map((d) => d.decade).filter(Boolean),
-        availableGenres: genres.map((g) => g.genre).filter(Boolean),
-      };
-    } catch (error) {
-      this.logger.error('Error fetching lyric statistics', error.stack);
-      throw error;
-    }
-  }
-
-  /**
-   * Applies the shared gameplay filters. Deactivated lyrics are always
-   * excluded, so an admin removal takes effect for players immediately.
-   */
-  private applyFilters(
-    queryBuilder: SelectQueryBuilder<Lyrics>,
-    options: Partial<RandomLyricOptions>,
-  ): void {
-    queryBuilder.andWhere('lyrics.isActive = :isActive', { isActive: true });
+  ): Promise<GameLyric | null> {
+    const qb = this.lyricsRepository.createQueryBuilder('lyric');
 
     if (options.category) {
-      queryBuilder.andWhere('LOWER(lyrics.category) = LOWER(:category)', {
+      qb.andWhere('lyric.category = :category', {
         category: options.category,
       });
     }
 
     if (options.decade) {
-      queryBuilder.andWhere('lyrics.decade = :decade', {
-        decade: options.decade,
-      });
+      qb.andWhere('lyric.decade = :decade', { decade: options.decade });
     }
 
     if (options.genre) {
-      // genre is a Postgres enum and LOWER() has no enum overload, so resolve
-      // the value to the enum here and compare the column directly.
-      queryBuilder.andWhere('lyrics.genre = :genre', {
-        genre: this.resolveGenre(options.genre),
-      });
+      qb.andWhere('lyric.genre = :genre', { genre: options.genre });
     }
 
-    if (options.difficulty !== undefined) {
-      queryBuilder.andWhere('lyrics.difficulty = :difficulty', {
+    if (options.difficulty) {
+      qb.andWhere('lyric.difficulty = :difficulty', {
         difficulty: options.difficulty,
       });
     }
-  }
 
-  /**
-   * Maps a genre case-insensitively onto the Genre enum. The HTTP DTO already
-   * validates it, but the WebSocket gateway does not, and an unknown value
-   * would otherwise reach Postgres as an invalid enum literal.
-   */
-  private resolveGenre(genre: string): Genre {
-    const resolved = toGenre(genre);
-    if (!isGenre(resolved)) {
-      throw new BadRequestException(
-        `genre must be one of: ${Object.values(Genre).join(', ')}`,
+    if (options.excludeIds?.length) {
+      qb.andWhere('lyric.id NOT IN (:...excludeIds)', {
+        excludeIds: options.excludeIds,
+      });
+    }
+
+    if (options.userId && options.seenWindowDays) {
+      const cutoff = new Date(
+        Date.now() - options.seenWindowDays * 24 * 60 * 60 * 1000,
       );
+      const seen = await this.roundRepository.find({
+        where: {
+          userId: options.userId,
+          issuedAt: MoreThanOrEqual(cutoff),
+        },
+        select: ['lyricId'],
+      });
+      const seenIds = seen.map((r) => r.lyricId);
+      if (seenIds.length) {
+        qb.andWhere('lyric.id NOT IN (:...seenIds)', { seenIds });
+      }
     }
-    return resolved;
+
+    if (!options.ignorePreferences) {
+      if (!options.genre && options.preferredGenre) {
+        qb.andWhere('lyric.genre = :preferredGenre', {
+          preferredGenre: options.preferredGenre,
+        });
+      }
+      if (!options.decade && options.preferredDecade) {
+        qb.andWhere('lyric.decade = :preferredDecade', {
+          preferredDecade: options.preferredDecade,
+        });
+      }
+    }
+
+    qb.orderBy('RANDOM()').limit(1);
+
+    const lyric = await qb.getOne();
+
+    if (!lyric) {
+      return null;
+    }
+
+    return {
+      id: lyric.id,
+      lyricSnippet: lyric.lyricSnippet,
+      songTitle: lyric.songTitle,
+      artist: lyric.artist,
+      category: lyric.category,
+      decade: lyric.decade,
+      genre: lyric.genre,
+    };
   }
 
   /**
-   * Validates if a guess is reasonable (not empty, reasonable length)
-   * @param guess - The guess string to validate
+   * Ensures the player is an active participant of the given session.
    */
-  validateGuess(guess: string): { isValid: boolean; reason?: string } {
-    if (!guess || typeof guess !== 'string') {
-      return { isValid: false, reason: 'Guess cannot be empty' };
+  private async assertActiveParticipant(
+    userId: string,
+    sessionId: string,
+  ): Promise<void> {
+    const session = await this.sessionRepository.findOne({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw new NotFoundException('Session not found');
     }
 
-    const trimmedGuess = guess.trim();
-    if (trimmedGuess.length === 0) {
-      return { isValid: false, reason: 'Guess cannot be empty' };
+    if (!ACTIVE_SESSION_STATUSES.includes(session.status)) {
+      throw new ConflictException('Session is not active');
     }
 
-    if (trimmedGuess.length > 200) {
-      return {
-        isValid: false,
-        reason: 'Guess is too long (max 200 characters)',
-      };
-    }
+    const participants = await this.sessionRepository.manager
+      .getRepository('game_session_players')
+      .findOne({ where: { sessionId, userId } })
+      .catch(() => null);
 
-    return { isValid: true };
+    if (!participants) {
+      throw new ConflictException('Player is not part of this session');
+    }
   }
 
-  /** Normalizes a string for comparison (case, punctuation, whitespace). */
-  private normalizeString(str: string): string {
-    return normalizeAnswer(str);
+  /** Bumps the session's last-activity timestamp. */
+  private async touchSession(sessionId: string): Promise<void> {
+    await this.sessionRepository.update(
+      { id: sessionId },
+      { lastActivityAt: new Date() },
+    );
   }
+
+  private emitRoundEnded(
+    round: GameRound,
+    result: Omit<RoundEndedPayload, 'roundId' | 'sessionId' | 'userId'>,
+  ): void {
+    const payload: RoundEndedPayload = {
+      roundId: round.id,
+      sessionId: round.sessionId ?? null,
+      userId: round.userId,
+      ...result,
+    };
+    this.events.emit(RealtimeEvent.ROUND_ENDED, payload);
+  }
+}
+
+/** Counts the whitespace-separated words in a string. */
+function countWords(value: string): number {
+  return value.trim().split(/\s+/).filter(Boolean).length;
+}
+
+/** Returns the first character of a string, uppercased. */
+function firstLetter(value: string): string {
+  return value.trim().charAt(0).toUpperCase();
 }
