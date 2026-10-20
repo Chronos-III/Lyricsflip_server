@@ -75,11 +75,10 @@ export class AdminService {
   }
 
   async restoreLyric(id: number) {
-    const lyric = await this.lyricsService.findOne(id);
-    if (!lyric) {
+    const restored = await this.lyricsService.restore(id);
+    if (!restored) {
       throw new NotFoundException(`Lyric with id ${id} not found`);
     }
-    const restored = await this.lyricsService.restore(id);
     await this.lyricsService.invalidateCache();
     return restored;
   }

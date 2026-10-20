@@ -13,8 +13,6 @@ import { RoomUser } from './entities/room-user.entity';
 import { Lyrics } from '../lyrics/entities/lyrics.entity';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { GuessLyricDto } from './dto/guess-lyric.dto';
-import { PlayerSummaryDto } from '../users/dto/public-user.dto';
-import * as stringSimilarity from 'string-similarity';
 import { GuessType } from '../game/dto/guess.dto';
 import { matchGuess } from '../game/guess-matcher';
 import * as crypto from 'crypto';
@@ -214,7 +212,6 @@ export class RoomsService {
 
     return { items, total };
   }
-  }
 
   async getRoomStatus(
     roomId: string,
@@ -235,23 +232,6 @@ export class RoomsService {
       throw new NotFoundException('User has not joined this room');
     }
 
-    // Don't send actual lyrics if user hasn't guessed yet, and never the
-    // lyric's creator (a full User) if a caller happened to load it
-    const lyricFields: Partial<Lyrics> = { ...room.lyric };
-    delete lyricFields.createdBy;
-    const lyric = roomUser.hasGuessed
-      ? lyricFields
-      : { ...lyricFields, content: '' };
-
-    return {
-      ...room,
-      lyric,
-      // Room members are other players: expose only id and username
-      roomUsers: room.roomUsers.map(({ user, ...member }) => ({
-        ...member,
-        user: user ? PlayerSummaryDto.from(user) : undefined,
-      })),
-    };
     return {
       id: room.id,
       name: room.name,
