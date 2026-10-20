@@ -31,8 +31,22 @@ describe('UsersController - Leaderboard', () => {
   });
 
   it('should return leaderboard from controller', async () => {
-    const result = await controller.getLeaderboard({ limit: 2, offset: 0 });
+    const options = { limit: 2, offset: 0, sort: 'xp', order: 'DESC' as const };
+    const result = await controller.getLeaderboard(options);
     expect(result).toEqual(leaderboardMock);
-    expect(service.getLeaderboard).toHaveBeenCalledWith(2, 0, 'xp', 'DESC');
+    expect(service.getLeaderboard).toHaveBeenCalledWith(options);
+  });
+
+  it('should include myRank when a bearer token is present', async () => {
+    const options = { limit: 2, offset: 0, sort: 'xp', order: 'DESC' as const };
+    const withRank = { ...leaderboardMock, myRank: 1 };
+    (service.getLeaderboard as jest.Mock).mockResolvedValueOnce(withRank);
+
+    const req = { user: { id: '1', username: 'alice' } } as any;
+    const result = await controller.getLeaderboard(options, req);
+
+    expect(result).toEqual(withRank);
+    expect(result.myRank).toBe(1);
+    expect(service.getLeaderboard).toHaveBeenCalledWith(options, '1');
   });
 });

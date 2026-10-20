@@ -12,13 +12,14 @@ describe('AdminController', () => {
   const mockAdminService = {
     findAllUsers: jest.fn().mockResolvedValue({
       data: [{ id: '1', email: 'user@test.com' }],
-      meta: { total: 1, page: 1, limit: 5 },
+      meta: { total: 11, limit: 10, offset: 10 },
     }),
     deleteUser: jest.fn().mockResolvedValue({ message: 'User deleted' }),
-    findInactiveLyrics: jest.fn().mockResolvedValue({
+    findAllLyrics: jest.fn().mockResolvedValue({
       data: [{ id: 'lyric-1', title: 'Removed lyric', isActive: false }],
-      meta: { total: 1, page: 1, limit: 5 },
+      meta: { total: 1, limit: 5, offset: 0 },
     }),
+    importLyrics: jest.fn().mockResolvedValue({ id: 'lyric-2', title: 'Imported lyric' }),
     restoreLyric: jest.fn().mockResolvedValue({ id: 'lyric-1', title: 'Removed lyric', isActive: true }),
   };
 
@@ -64,21 +65,18 @@ describe('AdminController', () => {
 
   describe('GET /admin/users', () => {
     it('should allow an admin to find all users', async () => {
-      const result = await controller.findAllUsers({ page: 1, limit: 5 });
+      const result = await controller.findAllUsers({ limit: 5, offset: 0 });
       expect(result).toBeDefined();
       expect(result.data).toBeDefined();
-      expect(result.meta).toEqual({ total: 1, page: 1, limit: 5 });
-      expect(mockAdminService.findAllUsers).toHaveBeenCalledWith({ page: 1, limit: 5 });
+      expect(result.meta.total).toBe(11);
+      expect(mockAdminService.findAllUsers).toHaveBeenCalledWith({ limit: 5, offset: 0 });
     });
 
-    it('should pass sorting options through to the service', async () => {
-      await controller.findAllUsers({ page: 2, limit: 10, sortBy: 'email', sortOrder: 'DESC' });
-      expect(mockAdminService.findAllUsers).toHaveBeenCalledWith({
-        page: 2,
-        limit: 10,
-        sortBy: 'email',
-        sortOrder: 'DESC',
-      });
+    it('should pass pagination and sorting options through to the service', async () => {
+      const query = { limit: 10, offset: 10, sortBy: 'createdAt', sortOrder: 'ASC' as const };
+      const result = await controller.findAllUsers(query);
+      expect(result.meta.total).toBe(11);
+      expect(mockAdminService.findAllUsers).toHaveBeenCalledWith(query);
     });
   });
 
@@ -92,11 +90,27 @@ describe('AdminController', () => {
 
   describe('GET /admin/lyrics?status=inactive', () => {
     it('should allow an admin to list deactivated lyrics', async () => {
-      const result = await controller.findInactiveLyrics({ page: 1, limit: 5 });
+      const query = { limit: 5, offset: 0, status: 'inactive' as const };
+      const result = await controller.findAllLyrics(query);
       expect(result).toBeDefined();
       expect(result.data).toBeDefined();
-      expect(result.meta).toEqual({ total: 1, page: 1, limit: 5 });
-      expect(mockAdminService.findInactiveLyrics).toHaveBeenCalledWith({ page: 1, limit: 5 });
+      expect(result.meta.total).toBe(1);
+      expect(mockAdminService.findAllLyrics).toHaveBeenCalledWith(query);
+    });
+
+    it('should pass the status filter through to the service', async () => {
+      await controller.findAllLyrics({ limit: 5, offset: 0, status: 'inactive' });
+      expect(mockAdminService.findAllLyrics).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'inactive' }),
+      );
+    });
+  });
+
+  describe('POST /admin/lyrics/import', () => {
+    it('should forward the acting admin to the service', async () => {
+      const dto = { title: 'Imported lyric', content: 'la la' } as any;
+      await controller.importLyrics(dto, adminUser);
+      expect(mockAdminService.importLyrics).toHaveBeenCalledWith(dto, adminUser);
     });
   });
 

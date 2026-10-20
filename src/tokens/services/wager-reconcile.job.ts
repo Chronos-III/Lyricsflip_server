@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { DataSource, LessThan, Repository } from 'typeorm';
+import { Counter, Gauge } from 'prom-client';
 import { Wager, WagerStatus } from '../entities/wager.entity';
 import { WagerService } from './wager.service';
 
@@ -25,6 +26,18 @@ export class WagerReconcileJob {
     string,
     { count: number; nextAt: number }
   >();
+
+  /** Number of wagers abandoned by reconciliation (moved to FAILED). */
+  private readonly reconcileGiveups = new Counter({
+    name: 'lyricsflip_reconcile_giveups_total',
+    help: 'Wagers abandoned by reconciliation and moved to FAILED',
+  });
+
+  /** Age in seconds of the oldest wager still stuck in SETTLING. */
+  private readonly oldestSettlingAge = new Gauge({
+    name: 'lyricsflip_oldest_settling_wager_age_seconds',
+    help: 'Age in seconds of the oldest wager still in SETTLING status',
+  });
 
   constructor(
     @InjectRepository(Wager)
@@ -79,6 +92,8 @@ export class WagerReconcileJob {
       },
     });
 
+    this.oldestSettlingAge.set(this.computeOldestSettlingAgeSeconds(stuck));
+
     for (const wager of stuck) {
       const state = this.attempts.get(wager.id) ?? { count: 0, nextAt: 0 };
       if (Date.now() < state.nextAt) continue;
@@ -109,10 +124,31 @@ export class WagerReconcileJob {
           },
         );
         this.attempts.delete(wager.id);
+        this.reconcileGiveups.inc();
         this.logger.error(
           `ALERT: wager ${wager.id} (session ${wager.sessionId}) moved to FAILED after ${state.count} reconcile attempts`,
         );
+
+        // Notify both players that their wager is stuck and needs attention.
+        try {
+          await this.wagerService.notifyWagerOutcome(wager, 'wager.needs_attention');
+        } catch (error) {
+          this.logger.warn(
+            `Failed to notify players of stuck wager ${wager.id}: ${(error as Error).message}`,
+          );
+        }
       }
     }
+  }
+
+  private computeOldestSettlingAgeSeconds(stuck: Wager[]): number {
+    if (stuck.length === 0) return 0;
+    const now = Date.now();
+    let oldest = now;
+    for (const wager of stuck) {
+      const updatedAt = wager.updatedAt?.getTime?.() ?? now;
+      if (updatedAt < oldest) oldest = updatedAt;
+    }
+    return Math.max(0, Math.round((now - oldest) / 1000));
   }
 }

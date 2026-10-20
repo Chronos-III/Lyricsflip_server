@@ -134,7 +134,7 @@ export class LyricsController {
   })
   @Get('genre/:genre')
   async getLyricsByGenre(@Param('genre') genre: string, @GetUser() user: User) {
-    const lyrics = await this.lyricsService.getLyricsByCategory('genre', genre);
+    const lyrics = await this.lyricsService.getLyricsByCategory(genre);
     return lyrics.map((lyric) => forCaller(lyric, user));
   }
 
@@ -154,6 +154,8 @@ export class LyricsController {
       'decade',
       normalizedDecade,
     );
+    const decadeNum = Number.parseInt(decade, 10);
+    const lyrics = await this.lyricsService.getLyricsByCategory(decadeNum);
     return lyrics.map((lyric) => forCaller(lyric, user));
   }
 
@@ -169,7 +171,7 @@ export class LyricsController {
   @Roles(Role.Admin)
   @Get('artist/:artist')
   getLyricsByArtist(@Param('artist') artist: string) {
-    return this.lyricsService.getLyricsByCategory('artist', artist);
+    return this.lyricsService.findByArtist(artist);
   }
 
   // Full-text search spans answer fields (title/artist), so it is admin only.
@@ -234,7 +236,7 @@ export class LyricsController {
   @Roles(Role.Admin)
   @Post('cache/clear')
   clearCache() {
-    return this.lyricsService.clearCache();
+    return this.lyricsService.invalidateCache();
   }
 
   @ApiBearerAuth()

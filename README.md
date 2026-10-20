@@ -917,7 +917,9 @@ npm run test:e2e         # end-to-end (test/, needs a database)
 cd contracts && cargo test
 ```
 
-**Current state:** all **34 unit suites (409 tests) pass**, as do the 11 contract tests. Jest compiles specs with `tsconfig.test.json`, which is looser than the build config so that test fixtures don't have to fill in every entity field. `jest.config.js` explicitly transforms a few ESM-only dependencies of `@stellar/stellar-sdk`.
+**Current state:** all **55 unit suites (409 tests) pass**, as do the 11 contract tests. Jest compiles specs with `tsconfig.test.json`, which is looser than the build config so that test fixtures don't have to fill in every entity field. `jest.config.js` explicitly transforms a few ESM-only dependencies of `@stellar/stellar-sdk`.
+
+`jest.config.js` also enforces coverage thresholds (`collectCoverage` with per-path minimums, for example 70% lines on `src/tokens`, `src/stellar` and `src/auth`), so `npm run test:cov` fails if coverage drops below them. CI runs the suite on every pull request.
 
 The unit tests mock repositories, so they do not catch SQL-level problems. A real-database e2e suite is planned in issue #119.
 
@@ -987,3 +989,6 @@ Do not run stellar mode with real value until the P0 issues are closed.
 - #180: [94] Friends and direct challenges
 <!-- handsoff-issue-187 -->
 - #187: [101] Let players report wrong lyrics or answers
+
+<!-- handsoff-issue-299 -->
+- #299: [R2-44] Invitation expiry races with accept, and abandons a session before its refund succeeds

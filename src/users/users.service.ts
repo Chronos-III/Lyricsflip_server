@@ -4,11 +4,12 @@ import {
   ConflictException,
   Inject,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
-import { CreateUserDto } from './dto/create-user.dto';
+import * as bcrypt from 'bcrypt';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserPreferencesDto } from './dto/update-user-preferences.dto';
 import { User } from './entities/user.entity';
@@ -66,6 +67,10 @@ export class UsersService {
     });
   }
 
+  async count(): Promise<number> {
+    return this.userRepository.count();
+  }
+
   async findOne(id: string) {
     const user = await this.userRepository.findOne({
       where: { id },
@@ -106,6 +111,13 @@ export class UsersService {
   }
 
   /**
+   * Alias used by the controller for the public profile lookup.
+   */
+  async findByUsername(username: string) {
+    return this.findPublicProfile(username);
+  }
+
+  /**
    * Returns the richer self-service profile for the authenticated user:
    * the user record, its level title, the linked wallet, a balance summary
    * and gameplay stats.
@@ -137,6 +149,13 @@ export class UsersService {
       },
       stats,
     };
+  }
+
+  /**
+   * Alias used by the controller for the authenticated user's profile.
+   */
+  async getSelfProfile(userId: string) {
+    return this.getProfile(userId);
   }
 
   /**
@@ -236,6 +255,31 @@ export class UsersService {
 
     await this.userRepository.save(user);
     return { message: 'User deactivated successfully' };
+  }
+
+  /**
+   * Self-service account deletion. Re-authenticates the caller with their
+   * current password before delegating to the anonymizing `remove`. A wrong
+   * password throws 401 and leaves the account untouched.
+   */
+  async deleteAccount(userId: string, password: string) {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+      select: ['id', 'password'],
+    });
+    if (!user) {
+      throw new NotFoundException(`User with ID ${userId} not found`);
+    }
+
+    const matches =
+      typeof user.password === 'string' &&
+      user.password.length > 0 &&
+      (await bcrypt.compare(password, user.password));
+    if (!matches) {
+      throw new UnauthorizedException('Invalid password');
+    }
+
+    return this.remove(userId);
   }
 
   /**
@@ -345,15 +389,24 @@ export class UsersService {
    * @param genre optional genre filter applied to game history
    * @param currentUserId optional caller id used to compute "my rank"
    */
-  async getLeaderboard(
-    limit = 10,
-    offset = 0,
-    sort = 'xp',
-    order: 'ASC' | 'DESC' = 'DESC',
-    period: LeaderboardPeriod = 'all',
-    genre?: string,
-    currentUserId?: string,
-  ) {
+  async getLeaderboard(options: {
+    limit?: number;
+    offset?: number;
+    sort?: string;
+    order?: 'ASC' | 'DESC';
+    period?: LeaderboardPeriod;
+    genre?: string;
+    currentUserId?: string;
+  } = {}) {
+    const {
+      limit = 10,
+      offset = 0,
+      sort = 'xp',
+      order = 'DESC',
+      period = 'all',
+      genre,
+      currentUserId,
+    } = options;
     // Number.isInteger also rejects NaN, which slips past `limit < 1`.
     if (
       !Number.isInteger(limit) ||

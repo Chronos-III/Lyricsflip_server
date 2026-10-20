@@ -172,7 +172,6 @@ export class UsersController {
       order: query.order ?? 'DESC',
       period: query.period ?? 'all',
       genre: query.genre,
-      includeAdmins: query.includeAdmins ?? false,
       currentUserId: user?.id,
     });
   }

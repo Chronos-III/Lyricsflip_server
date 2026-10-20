@@ -5,6 +5,7 @@ import { LessThan, Repository } from 'typeorm';
 import { Wager, WagerStatus } from '../entities/wager.entity';
 import { GameSession, GameSessionStatus } from '../../game-sessions/entities/game-session.entity';
 import { WagerService } from './wager.service';
+import { JobLockService } from '../../jobs/job-lock.service';
 
 /**
  * Refunds wagers whose pot has been open too long with at least one player
@@ -20,6 +21,9 @@ import { WagerService } from './wager.service';
  * wager out of that status as its very first step (to `SETTLING`, then
  * `REFUNDED` or `FAILED`), so a wager this run picks up is never picked up by
  * a run that overlaps it.
+ *
+ * Runs under a Postgres advisory lock via {@link JobLockService} so that with
+ * multiple instances only one of them performs the sweep per tick.
  */
 @Injectable()
 export class WagerRefundJob {
@@ -31,10 +35,17 @@ export class WagerRefundJob {
     @InjectRepository(GameSession)
     private readonly gameSessionRepository: Repository<GameSession>,
     private readonly wagerService: WagerService,
+    private readonly jobLockService: JobLockService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
   async refundExpiredWagers(): Promise<void> {
+    await this.jobLockService.runExclusive('wager-refund', () =>
+      this.sweepExpiredWagers(),
+    );
+  }
+
+  private async sweepExpiredWagers(): Promise<void> {
     const expired = await this.wagerRepository.find({
       where: {
         status: WagerStatus.AWAITING_STAKES,
@@ -73,9 +84,11 @@ export class WagerRefundJob {
         { status: GameSessionStatus.ABANDONED },
       );
 
-      // Notifying both players belongs to the in-app notification system
-      // (issue #168); until that lands, this is the operator-visible record
-      // that it happened.
+      // WagerService.resolveWagerAsDraw emits the terminal `wager.refunded`
+      // (or `wager.failed`) domain event, which the notifications listener
+      // turns into a stored notification for both players and a realtime
+      // push to each user's room. This log stays as the operator-visible
+      // record of the automatic sweep.
       this.logger.log(
         `Wager ${wager.id} (session ${wager.sessionId}) refunded automatically; ` +
           `players ${wager.playerAId} and ${wager.playerBId} never both staked ` +
