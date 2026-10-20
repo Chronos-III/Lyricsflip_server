@@ -60,6 +60,16 @@ export const envValidationSchema = Joi.object({
   DB_POOL_SIZE: Joi.number().integer().min(1).default(10),
   DB_SLOW_QUERY_THRESHOLD_MS: Joi.number().integer().min(0).default(250),
 
+  // Mail transport (#262). All optional: when MAIL_HOST is unset the mailer
+  // falls back to a console/no-op transport, which is what development and
+  // tests use.
+  MAIL_HOST: Joi.string().optional().allow(''),
+  MAIL_PORT: Joi.number().port().default(587),
+  MAIL_USER: Joi.string().optional().allow(''),
+  MAIL_PASSWORD: Joi.string().optional().allow(''),
+  MAIL_FROM: Joi.string().email().default('no-reply@lyricsflip.local'),
+  MAIL_SECURE: Joi.string().valid('true', 'false').default('false'),
+
   // Redis cache (#201). Optional: when unset the app falls back to memory cache.
   REDIS_URL: Joi.string().uri().optional(),
 

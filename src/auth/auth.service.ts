@@ -16,6 +16,8 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtPayload } from './interfaces/jwt-payload.interface';
 import { Role } from './roles/role.enum';
 import { AuthResult, AuthTokenService } from './services/auth-token.service';
+import { EmailVerificationService } from './services/email-verification.service';
+import { PasswordResetService } from './services/password-reset.service';
 import { User } from 'src/users/entities/user.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 
@@ -37,6 +39,8 @@ export class AuthService {
     private refreshTokenRepository: Repository<RefreshToken>,
     private jwtService: JwtService,
     private authTokenService: AuthTokenService,
+    private emailVerificationService: EmailVerificationService,
+    private passwordResetService: PasswordResetService,
   ) {}
 
   async signup(signupDto: SignupDto): Promise<AuthResult> {
@@ -191,6 +195,74 @@ export class AuthService {
     }
 
     user.passwordHash = await this.hashPassword(dto.newPassword);
+    user.tokenVersion += 1;
+    await this.userRepository.save(user);
+
+    await this.refreshTokenRepository.update(
+      { userId: user.id, revokedAt: IsNull() },
+      { revokedAt: new Date() },
+    );
+  }
+
+  /**
+   * Consumes a single-use email verification token and marks the account
+   * verified. Throws 400 if the token is unknown, already used or expired.
+   */
+  async verifyEmail(token: string): Promise<void> {
+    await this.emailVerificationService.consume(token);
+  }
+
+  /**
+   * Re-sends a verification email if the account exists and is not yet
+   * verified. Always resolves, so callers cannot probe for registered
+   * addresses.
+   */
+  async resendVerification(email: string): Promise<void> {
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .where('LOWER(user.email) = LOWER(:email)', { email })
+      .getOne();
+
+    if (!user || user.emailVerifiedAt) {
+      return;
+    }
+
+    await this.emailVerificationService.issue(user);
+  }
+
+  /**
+   * Sends a password reset email if the account exists. Always resolves,
+   * so the response is identical whether or not the email is registered.
+   */
+  async forgotPassword(email: string): Promise<void> {
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .where('LOWER(user.email) = LOWER(:email)', { email })
+      .getOne();
+
+    if (!user) {
+      return;
+    }
+
+    await this.passwordResetService.issue(user);
+  }
+
+  /**
+   * Consumes a single-use password reset token, sets the new password,
+   * bumps tokenVersion (invalidating every outstanding access token) and
+   * revokes all of the user's refresh tokens, as changePassword does.
+   */
+  async resetPassword(token: string, password: string): Promise<void> {
+    const userId = await this.passwordResetService.consume(token);
+
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+    });
+    if (!user) {
+      throw new BadRequestException('Invalid or expired reset token');
+    }
+
+    user.passwordHash = await this.hashPassword(password);
     user.tokenVersion += 1;
     await this.userRepository.save(user);
 
