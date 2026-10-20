@@ -12,25 +12,63 @@ export interface XpResult {
   levelTitle: UserLevel;
 }
 
+/**
+ * Canonical XP curve and title list.
+ *
+ * This is the single source of truth for the level system. Ordered
+ * thresholds — first match wins. Numeric `level` maps 1-to-1 to the
+ * position in this array (index + 1).
+ */
+export const LEVEL_THRESHOLDS: ReadonlyArray<{
+  min: number;
+  max: number;
+  level: number;
+  levelTitle: UserLevel;
+}> = [
+  { min: 0,    max: 99,       level: 1, levelTitle: UserLevel.GOSSIP_ROOKIE  },
+  { min: 100,  max: 299,      level: 2, levelTitle: UserLevel.WORD_WHISPERER },
+  { min: 300,  max: 599,      level: 3, levelTitle: UserLevel.LYRIC_SNIPER   },
+  { min: 600,  max: 999,      level: 4, levelTitle: UserLevel.BAR_GENIUS     },
+  { min: 1000, max: Infinity, level: 5, levelTitle: UserLevel.GOSSIP_GURU    },
+];
+
+/** XP awarded per correct guess — the single XP-award constant. */
+export const XP_PER_CORRECT_GUESS = 10;
+
+/**
+ * Pure: return the numeric level (1–5) and its human-readable title for a
+ * given XP total.
+ */
+export function getLevelFromXp(xp: number): {
+  level: number;
+  levelTitle: UserLevel;
+} {
+  const threshold =
+    LEVEL_THRESHOLDS.find((t) => xp >= t.min && xp <= t.max) ??
+    LEVEL_THRESHOLDS[0];
+
+  return { level: threshold.level, levelTitle: threshold.levelTitle };
+}
+
+/**
+ * Pure: add XP for a number of correct guesses and return the updated totals.
+ *
+ * @param currentXp      - The user's current total XP.
+ * @param correctGuesses - How many correct guesses to award (default 1).
+ * @param xpPerGuess     - XP per correct guess (default XP_PER_CORRECT_GUESS).
+ */
+export function calculateXpGain(
+  currentXp: number,
+  correctGuesses = 1,
+  xpPerGuess = XP_PER_CORRECT_GUESS,
+): XpResult {
+  const newXp = currentXp + correctGuesses * xpPerGuess;
+  const { level, levelTitle } = getLevelFromXp(newXp);
+  return { xp: newXp, level, levelTitle };
+}
+
 @Injectable()
 export class XpLevelService {
-  /**
-   * Ordered thresholds — first match wins.
-   * Numeric `level` maps 1-to-1 to the position in this array (index + 1).
-   */
-  private readonly LEVEL_THRESHOLDS: ReadonlyArray<{
-    min: number;
-    max: number;
-    level: number;
-    levelTitle: UserLevel;
-  }> = [
-    { min: 0,    max: 99,       level: 1, levelTitle: UserLevel.GOSSIP_ROOKIE  },
-    { min: 100,  max: 299,      level: 2, levelTitle: UserLevel.WORD_WHISPERER },
-    { min: 300,  max: 599,      level: 3, levelTitle: UserLevel.LYRIC_SNIPER   },
-    { min: 600,  max: 999,      level: 4, levelTitle: UserLevel.BAR_GENIUS     },
-    { min: 1000, max: Infinity, level: 5, levelTitle: UserLevel.GOSSIP_GURU    },
-  ];
-
   constructor(
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
@@ -40,33 +78,18 @@ export class XpLevelService {
   // Pure helpers (no DB I/O — safe to call in unit tests without a repo)
   // -------------------------------------------------------------------------
 
-  /**
-   * Return the numeric level (1–5) and its human-readable title for a
-   * given XP total.
-   */
+  /** Return the numeric level (1–5) and its human-readable title for XP. */
   getLevelFromXp(xp: number): { level: number; levelTitle: UserLevel } {
-    const threshold =
-      this.LEVEL_THRESHOLDS.find((t) => xp >= t.min && xp <= t.max) ??
-      this.LEVEL_THRESHOLDS[0];
-
-    return { level: threshold.level, levelTitle: threshold.levelTitle };
+    return getLevelFromXp(xp);
   }
 
-  /**
-   * Add XP for a number of correct guesses and return the updated totals.
-   *
-   * @param currentXp      - The user's current total XP.
-   * @param correctGuesses - How many correct guesses to award (default 1).
-   * @param xpPerGuess     - XP per correct guess (default 10).
-   */
+  /** Add XP for a number of correct guesses and return the updated totals. */
   calculateXpGain(
     currentXp: number,
     correctGuesses = 1,
-    xpPerGuess = 10,
+    xpPerGuess = XP_PER_CORRECT_GUESS,
   ): XpResult {
-    const newXp = currentXp + correctGuesses * xpPerGuess;
-    const { level, levelTitle } = this.getLevelFromXp(newXp);
-    return { xp: newXp, level, levelTitle };
+    return calculateXpGain(currentXp, correctGuesses, xpPerGuess);
   }
 
   // -------------------------------------------------------------------------
