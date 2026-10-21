@@ -40,4 +40,35 @@ WHERE "sessionId" IN (
 );
 ```
 
+Purge from Production: Once the copy is verified, the script deletes the archived rows from the production database table.
+
+3. Example Workflow (Archiving User Logs)
+Let's say we want to archive user logs older than 2 years.
+
+A scheduled script runs once a month.
+
+SQL Query to select data:
+
+SELECT * FROM user_logs WHERE created_at < NOW() - INTERVAL '2 years';
+
+The script takes the result of this query and inserts it into an archived_user_logs table in a separate "archive" database.
+
+After verifying the data integrity in the archive, it runs the delete command on the production database:
+
+DELETE FROM user_logs WHERE created_at < NOW() - INTERVAL '2 years';
+
+This process ensures the production user_logs table remains at a manageable size, directly contributing to sustained application performance.
+
+4. Game Rounds Retention (`game_rounds`)
+
+A row is inserted into `game_rounds` every time a lyric is served, including rounds the player never guessed. Without retention this table grows without bound and the seen-window query (`getRecentlySeenLyricIds`, which filters by `userId` and `issuedAt`) degrades. Two mechanisms keep it bounded:
+
+Index: `GameRound` declares a composite index on `(userId, issuedAt)` so the seen-window query uses an index scan instead of a sequential scan.
+
+Daily retention job: a scheduled job runs once per day and is guarded by the distributed lock from issue 43 so concurrent runs cannot overlap. Each run:
+
+- Deletes unguessed rounds older than the seen window (they are no longer relevant to `getRecentlySeenLyricIds`).
+- Moves guessed rounds older than the configured retention period (N days) into the archive table, or deletes them once `game_history` already holds the record.
+
+Retention settings (seen window and N days) are configurable; `game_rounds` size is therefore bounded by those settings rather than by total traffic.
 Always execute purges in bounded batches during off-peak hours to avoid prolonged table locks.
